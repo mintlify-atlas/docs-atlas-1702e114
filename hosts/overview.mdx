@@ -54,35 +54,9 @@ The repository ships several host implementations that demonstrate different int
   >
     A Google ADK-based orchestrating host that maintains a registry of remote agents, uses an LLM to route requests, and wraps each remote connection in a typed `RemoteAgentConnections` client.
   </Card>
-  <Card
-    title="Demo Web UI"
-    icon="browser"
-    href="https://github.com/MathematicusLucian/A2A/tree/main/demo"
-  >
-    A Mesop-based web application that visualises conversations between the end user and the Host Agent. Renders text, images, and web-form artifacts; includes dedicated tabs for task history and agent card inspection.
-  </Card>
-  <Card
-    title="GUI Host (a2a_gui)"
-    icon="window"
-    href="https://github.com/MathematicusLucian/A2A/tree/main/samples/python/hosts/a2a_gui"
-  >
-    A desktop GUI host sample for exploring A2A agent interactions with a graphical interface.
-  </Card>
-  <Card
-    title="BeeAI Chat Host"
-    icon="bee"
-    href="https://github.com/MathematicusLucian/A2A/tree/main/samples/python/hosts/beeai-chat"
-  >
-    A chat-oriented host built on the BeeAI framework, demonstrating how third-party agent runtimes can act as A2A host clients.
-  </Card>
-  <Card
-    title="Content Creation Host"
-    icon="pen-nib"
-    href="https://github.com/MathematicusLucian/A2A/tree/main/samples/python/hosts/content_creation"
-  >
-    A multi-language interoperability demo where Python, Go, and other agents collaborate on a content creation pipeline, showing how agents written in different SDKs can be orchestrated by a single host.
-  </Card>
 </CardGroup>
+
+The repository also includes additional host samples for exploring different integration styles. The **Demo Web UI** (`demo/ui/`) is a [Mesop](https://github.com/mesop-dev/mesop)-based web application that visualises conversations between the end user and the Host Agent — it renders text, images, and web-form artifacts, and includes dedicated tabs for task history and agent card inspection. The **a2a\_gui** sample (`samples/python/hosts/a2a_gui/`) provides a desktop GUI for exploring agent interactions. The **BeeAI Chat Host** (`samples/python/hosts/beeai-chat/`) demonstrates how a third-party agent runtime can act as an A2A host client. The **Content Creation Host** (`samples/python/hosts/content_creation/`) shows a multi-language interoperability pipeline where Python and Go agents collaborate under a single orchestrating host.
 
 ## Choosing a Host Pattern
 

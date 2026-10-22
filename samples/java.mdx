@@ -1,7 +1,7 @@
 ---
 title: "Java A2A Samples: Spring Boot, Quarkus, and Custom SDK"
 sidebarTitle: "Java"
-description: "Build A2A-compliant agents in Java using Spring Boot, Quarkus LangChain4j, and a custom Maven SDK. Covers five sample agents with streaming, security, and multi-transport."
+description: "Java A2A samples with Spring Boot, Quarkus LangChain4j, and a custom Maven SDK. Agents demonstrate streaming, Keycloak security, and multi-transport gRPC."
 ---
 
 The A2A Java samples cover two complementary approaches to building Agent-to-Agent protocol agents: a custom Maven multi-module implementation (`custom_java_impl`) that includes its own model, server, and client SDKs built on Spring Boot and Spring AI, and a collection of Quarkus LangChain4j-based sample agents (`agents/`) that use the official [A2A Java SDK](https://github.com/a2aproject/a2a-java). Both paths demonstrate the full A2A lifecycle — AgentCard publication, JSON-RPC task dispatch, SSE streaming, and standardized error codes.
@@ -19,8 +19,8 @@ The A2A Java samples cover two complementary approaches to building Agent-to-Age
   <Card title="Dice Agent (Multi-Transport)" icon="dice">
     Quarkus LangChain4j agent that rolls dice and checks primality. Supports both gRPC and JSON-RPC transports on a unified port.
   </Card>
-  <Card title="Weather MCP Agent" icon="cloud-sun">
-    Provides weather information using the Model Context Protocol (MCP). Integrates with the Python `weather_and_airbnb_planner` multi-agent host.
+  <Card title="Weather Agent" icon="cloud-sun">
+    Provides weather information by connecting to a weather MCP server. Integrates with the Python `weather_and_airbnb_planner` multi-agent host.
   </Card>
   <Card title="Magic 8 Ball Agent (Security)" icon="shield-halved">
     Answers yes/no questions via a Magic 8 Ball. Demonstrates Keycloak bearer token authentication for securing an A2A server.
@@ -292,7 +292,7 @@ uv run test_client.py
 All Quarkus agents follow the same pattern: navigate to the agent's `server/` directory, configure an API key, and run `mvn quarkus:dev`.
 
 <Tabs>
-  <Tab title="Weather MCP">
+  <Tab title="Weather Agent">
     ```bash
     cd samples/java/agents/weather_mcp/server
     # Set the required LLM API key per the agent's README

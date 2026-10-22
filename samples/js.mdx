@@ -1,7 +1,7 @@
 ---
 title: "JavaScript (Node.js) A2A Samples with Genkit"
 sidebarTitle: "JavaScript"
-description: "Run A2A-compliant agents in Node.js using Genkit and the Gemini API. Covers three sample agents — Movie, Coder, and Content Editor — plus the CLI client."
+description: "Build A2A agents in Node.js with Genkit and the Gemini API. Three sample agents — Movie, Coder, and Content Editor — with an interactive CLI client."
 ---
 
 The A2A JavaScript samples demonstrate how to build and run Agent-to-Agent protocol-compatible agents on Node.js using [Genkit](https://genkit.dev/) and the Gemini API. Three complete sample agents are provided — a Movie information agent powered by TMDB, a Coder agent that emits full code files as artifacts, and a Content Editor agent that proofreads and polishes text — alongside a command-line client you can use to send messages to any running agent.
@@ -43,7 +43,7 @@ The A2A JavaScript samples demonstrate how to build and run Agent-to-Agent proto
     Uses the TMDB API to search for movie information and answer natural-language questions about films. Runs on `http://localhost:41241`.
   </Card>
   <Card title="Coder Agent" icon="code">
-    Generates complete, runnable code files and emits them as A2A artifacts. Runs on `http://localhost:41241`.
+    Generates complete, runnable code files and emits them as A2A artifacts. Runs on `http://localhost:41242`.
   </Card>
   <Card title="Content Editor Agent" icon="pen-nib">
     Proofreads and polishes written content. Runs on port `10003` by default and integrates with the multi-agent `content_creation` host.
@@ -98,7 +98,7 @@ Each agent is started with a corresponding `npm run` script. Open two terminals:
 The CLI client (`cli.ts`) is a command-line A2A host that connects to any running agent and lets you send messages interactively. Start it with:
 
 ```bash
-npx tsx ./cli.ts
+npx tsx src/cli.ts
 ```
 
 Or use the npm shortcut:
@@ -114,7 +114,7 @@ The client reads the agent's AgentCard from `/.well-known/agent.json`, then send
 | Agent | Default Port |
 |-------|-------------|
 | Movie Agent | `41241` |
-| Coder Agent | `41241` |
+| Coder Agent | `41242` |
 | Content Editor Agent | `10003` |
 
 ## Multi-Agent Integration

@@ -74,6 +74,10 @@ class RemoteAgentConnections:
         ]
 ```
 
+<Note>
+  The `a2a_multiagent_host/` variant uses a simpler `RemoteAgentConnections` that takes `(agent_card: AgentCard, agent_url: str)` directly and wraps `A2AClient` without a `ClientFactory`. Both variants expose the same `get_agent()` and `send_message()` interface to the routing layer above.
+</Note>
+
 ### `HostAgent` — Discovery and Routing
 
 `HostAgent` (`multiagent/host_agent.py`) initialises connections to all configured remote agents by resolving their `AgentCard`s concurrently at startup. Once registered, the cards are serialised into the LLM's system prompt so the model knows which agents exist and what they do:
@@ -166,6 +170,16 @@ async def execute(
 ```
 
 The executor also checks for the traceability extension URI in `context.requested_extensions` and, if present, activates it and builds a `ResponseTrace` that is appended as an artifact to the final response.
+
+`HostAgentExecutor` also implements a `cancel` method. Because the underlying ADK runner does not support mid-flight task cancellation, the current implementation logs the cancellation attempt, removes the session from the active-sessions set, and raises `ServerError(error=UnsupportedOperationError())` to signal to the A2A framework that cancellation is not supported:
+
+```python
+async def cancel(self, context: RequestContext, event_queue: EventQueue):
+    session_id = context.context_id
+    if session_id in self._active_sessions:
+        self._active_sessions.discard(session_id)
+    raise ServerError(error=UnsupportedOperationError())
+```
 
 ## Setting Up the Multi-Agent Host
 

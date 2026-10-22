@@ -1,7 +1,7 @@
 ---
 title: "Streaming Responses with Server-Sent Events in A2A"
 sidebarTitle: "Streaming"
-description: "Enable real-time streaming in Agent2Agent using the message/stream method, SSE event types, status-update and artifact-update events, and the final:true completion flag."
+description: "Stream A2A agent responses over SSE using message/stream, status-update and artifact-update events, the final:true flag, and a Python executor example."
 ---
 
 Agent2Agent supports **real-time streaming** through the `message/stream` JSON-RPC method. Instead of waiting for the agent to fully complete before returning a response, the server opens a persistent HTTP connection and emits Server-Sent Events (SSE) as work progresses — status transitions, intermediate messages, and final artifacts all arrive incrementally. This page covers how to declare streaming capability in your `AgentCard`, the two SSE event types (`status-update` and `artifact-update`), the `final: true` completion flag, and a complete Python streaming executor implementation.
@@ -173,6 +173,8 @@ from a2a.types import (
 from a2a.utils import new_agent_text_message, new_task
 from a2a.utils.errors import ServerError
 
+from app.agent import CurrencyAgent
+
 
 class CurrencyAgentExecutor(AgentExecutor):
     """Currency Conversion AgentExecutor Example."""
@@ -185,6 +187,10 @@ class CurrencyAgentExecutor(AgentExecutor):
         context: RequestContext,
         event_queue: EventQueue,
     ) -> None:
+        error = self._validate_request(context)
+        if error:
+            raise ServerError(error=InvalidParamsError())
+
         query = context.get_user_input()
         task = context.current_task
         if not task:
@@ -236,6 +242,9 @@ class CurrencyAgentExecutor(AgentExecutor):
 
         except Exception as e:
             raise ServerError(error=InternalError()) from e
+
+    def _validate_request(self, context: RequestContext) -> bool:
+        return False
 
     async def cancel(
         self, context: RequestContext, event_queue: EventQueue

@@ -1,7 +1,7 @@
 ---
 title: "Hello World Agent: A2A Python SDK Walkthrough"
 sidebarTitle: "Hello World"
-description: "Build your first A2A-compliant agent with Python. This page walks through every file in the helloworld sample — server setup, AgentCard, AgentExecutor, and the test client."
+description: "Build your first A2A-compliant agent with Python. Walks through the helloworld sample: server setup, AgentCard, AgentExecutor, and the test client."
 ---
 
 The A2A **Hello World** agent is the simplest possible demonstration of the Agent-to-Agent protocol in Python. It registers an `AgentCard`, exposes a JSON-RPC endpoint over HTTP with Starlette and Uvicorn, and responds to any text message with `"Hello, World! I have received your request (…)"`. Working through this sample teaches you every structural layer you will reuse in every A2A agent you build afterwards.
@@ -48,6 +48,10 @@ samples/python/agents/helloworld/
     Open a second terminal with the same virtual environment activated:
     ```bash
     python test_client.py
+    ```
+    This starts an interactive session. Type a message and press Enter to send it; type `exit` to quit. To run the automated test suite instead:
+    ```bash
+    pytest test_client.py -v
     ```
   </Step>
 </Steps>
@@ -169,7 +173,20 @@ uvicorn.run(app, host='127.0.0.1', port=9999)
 
 ## `agent_executor.py` — task execution
 
-This file contains two classes: the inner `HelloWorldAgent` (pure business logic) and `HelloWorldAgentExecutor` (the A2A adapter).
+This file contains two classes: the inner `HelloWorldAgent` (pure business logic) and `HelloWorldAgentExecutor` (the A2A adapter). It imports from `a2a.helpers` and `a2a.server.agent_execution`:
+
+```python
+from a2a.helpers import (
+    get_message_text,
+    new_task_from_user_message,
+    new_text_message,
+    new_text_part,
+)
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue
+from a2a.server.tasks import TaskUpdater
+from a2a.types import TaskState
+```
 
 ### HelloWorldAgent
 
@@ -271,6 +288,8 @@ async with httpx.AsyncClient() as httpx_client:
 
 ### Non-streaming message
 
+The `send_message` function in `test_client.py` creates a non-streaming client and sends a request:
+
 ```python
 from a2a.client import ClientConfig, create_client
 from a2a.helpers import new_text_message
@@ -279,7 +298,7 @@ from a2a.types import Role, SendMessageRequest
 config = ClientConfig(streaming=False)
 client = await create_client(agent=public_agent_card, client_config=config)
 
-message = new_text_message('Hi there', role=Role.ROLE_USER)
+message = new_text_message(text_query, role=Role.ROLE_USER)
 request = SendMessageRequest(message=message)
 
 async for chunk in client.send_message(request):
@@ -298,6 +317,16 @@ async for chunk in client.send_message(request):
     print(chunk)
 
 await client.close()
+```
+
+### Fetching the extended card
+
+Authenticated clients can call `get_extended_agent_card` to receive the card with the additional hidden skills:
+
+```python
+from a2a.types import GetExtendedAgentCardRequest
+
+extended_card = await client.get_extended_agent_card(GetExtendedAgentCardRequest())
 ```
 
 ### Running the full test suite

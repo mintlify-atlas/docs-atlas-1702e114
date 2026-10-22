@@ -1,7 +1,7 @@
 ---
-title: "Agent2Agent Protocol: Open Standard for Agent Interoperability"
+title: "Agent2Agent: Open Protocol for Agent Interoperability"
 sidebarTitle: "Introduction"
-description: "A2A is an open protocol enabling AI agents built on different frameworks and languages to communicate, delegate tasks, and collaborate via JSON-RPC 2.0 over HTTP."
+description: "A2A is an open protocol letting AI agents from different frameworks communicate, delegate tasks, and collaborate using JSON-RPC 2.0 over HTTP."
 ---
 
 Agent2Agent (A2A) is an open, standardized protocol that gives AI agents a common language for communication, task delegation, and collaboration — regardless of which framework or runtime they are built with. This page explains the problem A2A solves, how its architecture is structured, and the ecosystem of SDKs and frameworks that support it today.
@@ -46,7 +46,7 @@ Every A2A server publishes a machine-readable `AgentCard` at a well-known URL (`
     {
       "id": "echo_bot",
       "name": "Echo Bot",
-      "description": "Acknowledges client requests and responds with a Hello World message.",
+      "description": "An example agent that acknowledges client request and responds with a \"Hello World\" message.",
       "inputModes": ["text/plain"],
       "outputModes": ["text/plain"],
       "tags": ["a2a", "echo-example"],

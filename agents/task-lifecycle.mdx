@@ -1,7 +1,7 @@
 ---
 title: "Task Lifecycle: States, Transitions, and Multi-Turn Flows"
 sidebarTitle: "Task Lifecycle"
-description: "Understand A2A task states from submitted to completed, how contextId and taskId track conversations, and how to continue tasks across multiple request/response turns."
+description: "Learn how A2A task states work, how contextId and taskId track conversations, and how to continue tasks across multiple request/response turns."
 ---
 
 Every unit of work in Agent2Agent is represented as a **Task**. A task travels through a defined set of states from the moment a client sends its first message until the agent delivers a final result or the conversation is abandoned. Understanding this lifecycle — and how `contextId` and `taskId` keep multi-turn conversations coherent — is essential for building reliable agents and clients. This page explains every state, the valid transitions between them, and shows real JSON request/response sequences from the LangGraph currency agent sample.
@@ -329,6 +329,11 @@ When the user's initial message is ambiguous, the agent transitions to `input-re
 In your `AgentExecutor`, signal that the agent needs more information by calling `update_status` with `TaskState.input_required` and `final=True`. The `final=True` flag tells the SDK this is the last event for this processing cycle.
 
 ```python
+from a2a.server.tasks import TaskUpdater
+from a2a.types import TaskState
+from a2a.utils import new_agent_text_message
+
+# updater is a TaskUpdater bound to the current task
 await updater.update_status(
     TaskState.input_required,
     new_agent_text_message(

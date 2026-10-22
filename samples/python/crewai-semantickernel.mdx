@@ -1,7 +1,7 @@
 ---
 title: "CrewAI and Semantic Kernel Agents for A2A"
 sidebarTitle: "CrewAI & Semantic Kernel"
-description: "Two A2A agent samples using popular Python frameworks: a CrewAI image generation agent and a Semantic Kernel multi-agent travel planner with multi-turn streaming."
+description: "Two A2A Python samples: a CrewAI image generation agent using Google Gemini, and a Semantic Kernel multi-agent travel planner with streaming and memory."
 ---
 
 This page covers two A2A Python agent samples that demonstrate how different LLM orchestration frameworks integrate with the A2A protocol. The **CrewAI agent** generates images from text prompts using Google Gemini, while the **Semantic Kernel travel agent** coordinates a multi-agent pipeline for trip planning and currency conversion with real-time streaming and conversational memory.
@@ -16,7 +16,7 @@ The CrewAI agent accepts a text description from a client, passes it to a Google
 
 ```text
 samples/python/agents/crewai/
-├── agent.py           # ImageGenerationAgent + ImageGenerationTool (CrewAI)
+├── agent.py           # ImageGenerationAgent + generate_image_tool (CrewAI)
 ├── agent_executor.py  # ImageGenerationAgentExecutor
 ├── __main__.py        # AgentCard, A2AStarletteApplication startup
 ├── in_memory_cache.py # Session-scoped image cache
@@ -93,7 +93,7 @@ A2A Client → A2AStarletteApplication → ImageGenerationAgentExecutor
 
 #### CrewAI tool
 
-The `@tool` decorator wraps the Gemini call so CrewAI's planner knows when and how to invoke it:
+The `@tool` decorator wraps the Gemini call so CrewAI's planner knows when and how to invoke it. The tool builds a text instruction tuple (including an instruction to ignore unrelated reference images), retrieves any existing image from the session cache as a reference, and calls the Gemini multimodal API:
 
 ```python
 @tool('ImageGenerationTool')
@@ -106,6 +106,11 @@ def generate_image_tool(
 
     client = genai.Client()
     cache = InMemoryCache()
+
+    text_input = (
+        prompt,
+        'Ignore any input images if they do not match the request.',
+    )
 
     # Retrieve an existing image from the cache to use as a reference
     ref_image = None
@@ -121,7 +126,7 @@ def generate_image_tool(
     except Exception:
         ref_image = None
 
-    contents = [prompt, ref_image] if ref_image else prompt
+    contents = [text_input, ref_image] if ref_image else text_input
 
     response = client.models.generate_content(
         model='gemini-2.0-flash-exp',
@@ -265,6 +270,9 @@ class ImageGenerationAgentExecutor(AgentExecutor):
                 [context.message],
             )
         )
+
+    async def cancel(self, request: RequestContext, event_queue: EventQueue) -> Task | None:
+        raise ServerError(error=UnsupportedOperationError())
 ```
 
 ### `__main__.py` — AgentCard and server startup
@@ -455,6 +463,10 @@ class CurrencyPlugin:
 
 ```python
 class SemanticKernelTravelAgent:
+    agent: ChatCompletionAgent
+    thread: ChatHistoryAgentThread = None
+    SUPPORTED_CONTENT_TYPES = ['text', 'text/plain']
+
     def __init__(self):
         chat_service = get_chat_completion_service(ChatServices.AZURE_OPENAI)
 

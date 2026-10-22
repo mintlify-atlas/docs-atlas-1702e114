@@ -1,7 +1,7 @@
 ---
-title: "A2A Core Concepts: Protocol Primitives and Architecture"
+title: "A2A Core Concepts: Tasks, Messages, and Transport"
 sidebarTitle: "Core Concepts"
-description: "Detailed reference for every A2A building block: AgentCards, Tasks, Messages, Artifacts, JSON-RPC methods, SSE streaming, EventQueue, and the extensions mechanism."
+description: "Detailed reference for A2A building blocks: AgentCards, Tasks, Messages, Artifacts, JSON-RPC methods, SSE streaming, EventQueue, and extensions."
 ---
 
 Agent2Agent (A2A) is built on a small, composable set of primitives. Understanding these concepts — how they are structured, how they relate to each other, and how they flow through a live interaction — is the foundation for building or consuming any A2A-compliant agent. This page covers each primitive in depth, with real JSON structures drawn from the sample agents.
@@ -477,7 +477,7 @@ class HelloWorldAgentExecutor(AgentExecutor):
 
         # 3. Run the underlying agent
         query = get_message_text(context.message)
-        result = await self.agent.invoke(user_request=query) if query else 'No text input provided!'
+        result = await self.agent.invoke(user_request=query) if query else 'No text input is provided!'
 
         # 4. Attach the result as an artifact
         await task_updater.add_artifact(

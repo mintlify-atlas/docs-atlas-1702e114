@@ -177,7 +177,7 @@ async def lifespan(app: FastAPI):
   <Step title="Register the agent in the UI">
     In the running demo UI, open the **Remote Agents** tab and add the agent's address:
 
-    ```
+    ```text
     localhost:10002
     ```
 
@@ -269,4 +269,10 @@ The `pyproject.toml` for the demo UI declares the following primary dependencies
 | `google-adk[a2a]>=1.7.0` | Host Agent runner and ADK integrations |
 | `a2a-sdk>=0.3.0` | A2A protocol types and client |
 | `httpx>=0.28.1` | Async HTTP client for A2A requests |
+| `httpx-sse>=0.4.0` | Server-Sent Events support for streaming responses |
 | `google-genai>=1.9.0` | Gemini model access |
+| `pydantic>=2.11.0` | Data validation and settings management |
+| `pandas>=2.2.0` | Data manipulation for task and event tables |
+| `asyncio>=3.4.3` | Async I/O runtime |
+| `litellm` | Unified LLM provider interface |
+| `a2a-sample-client-multiagent` | Shared multiagent host client (workspace package) |

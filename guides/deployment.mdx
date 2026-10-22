@@ -1,10 +1,10 @@
 ---
-title: "Deploying A2A Agents to Production Environments"
+title: "Deploying A2A Agents to Google Cloud Run and Docker"
 sidebarTitle: "Deployment"
-description: "Package A2A agents as containers, run them with Docker or Podman, deploy to Google Cloud Run, configure environment variables, and expose the correct hostname via HOST_OVERRIDE."
+description: "Package A2A agents as containers, deploy to Google Cloud Run, manage environment variables, and set the public URL via APP_URL for your AgentCard."
 ---
 
-A2A agents are standard HTTP servers and can be deployed anywhere a container runtime or cloud platform is available. This page covers containerising an agent with the provided `Containerfile` and `Dockerfile`, running locally with Podman or Docker, deploying to Google Cloud Run, managing environment variables and secrets, and configuring the `HOST_OVERRIDE` environment variable so the `AgentCard` advertises the correct externally reachable URL.
+A2A agents are standard HTTP servers and can be deployed anywhere a container runtime or cloud platform is available. This page covers containerising an agent with the provided `Containerfile` and `Dockerfile`, running locally with Podman or Docker, deploying to Google Cloud Run, managing environment variables and secrets, and configuring the `APP_URL` environment variable so the `AgentCard` advertises the correct externally reachable URL.
 
 ---
 
@@ -31,8 +31,9 @@ USER root
 RUN dnf -y update && dnf install -y gcc gcc-c++ \
  && pip install uv
 
+# Set environment variables for uv:
 # UV_COMPILE_BYTECODE=1: Compiles Python files to .pyc for faster startup
-# UV_LINK_MODE=copy: Ensures files are copied, not symlinked
+# UV_LINK_MODE=copy: Ensures files are copied, not symlinked, which can avoid issues
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
 
@@ -40,6 +41,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 # --frozen: Ensures uv respects the uv.lock file
 # --no-install-project: Prevents installing the project itself in this stage
 # --no-dev: Excludes development dependencies
+# --mount=type=cache: Leverages Docker's build cache for uv, speeding up repeated builds
 RUN --mount=type=cache,target=/.cache/uv \
     uv sync --frozen --no-install-project --no-dev
 
@@ -47,13 +49,15 @@ RUN --mount=type=cache,target=/.cache/uv \
 RUN --mount=type=cache,target=/.cache/uv \
     uv sync --frozen --no-dev
 
-# Allow non-root user to access everything in app-root
+# Allow non-root user to access the everything in app-root
 RUN chgrp -R root /opt/app-root/ && chmod -R g+rwx /opt/app-root/
 
+# Expose default port (change if needed)
 EXPOSE 10000
 
 USER 1001
 
+# Run the agent
 CMD uv run app --host 0.0.0.0
 ```
 
@@ -143,18 +147,17 @@ All sensitive credentials and runtime configuration are passed as environment va
 | `GOOGLE_CLOUD_PROJECT` | GCP project ID for Vertex AI | `my-project-id` |
 | `GOOGLE_CLOUD_LOCATION` | GCP region for Vertex AI | `us-central1` |
 | `APP_URL` | The externally reachable URL of the deployed service — written into the `AgentCard` | `https://sample-a2a-agent-xyz.run.app` |
-| `HOST_OVERRIDE` | Alternative to `APP_URL` — overrides the hostname portion of the AgentCard URL when deploying behind a proxy or reverse load balancer | `agent.example.com` |
 | `USE_ALLOY_DB` | Enable AlloyDB-backed task store instead of in-memory | `True` |
 | `DB_INSTANCE` | AlloyDB instance URI | `projects/…/instances/primary` |
 | `DB_NAME` | Database name | `postgres` |
 
 <Note>
-  The `APP_URL` / `HOST_OVERRIDE` variables are critical. Without them, the `AgentCard` will advertise the internal container address (`0.0.0.0` or `localhost`), which is unreachable from other agents or clients outside the container network.
+  The `APP_URL` variable is critical. Without it, the `AgentCard` will advertise the internal container address (`0.0.0.0` or `localhost`), which is unreachable from other agents or clients outside the container network.
 </Note>
 
-### HOST_OVERRIDE for External Hostname
+### APP_URL for External Hostname
 
-When running behind a load balancer, reverse proxy, or on Cloud Run, the agent's internal listen address differs from its public URL. The `HOST_OVERRIDE` environment variable tells the server what hostname to publish in its `AgentCard.url`:
+When running behind a load balancer, reverse proxy, or on Cloud Run, the agent's internal listen address differs from its public URL. The `APP_URL` environment variable tells the server what URL to publish in its `AgentCard.url`. The ADK Cloud Run agent reads it directly at startup:
 
 ```python python
 # samples/python/agents/adk_cloud_run/__main__.py
@@ -170,14 +173,19 @@ agent_card = AgentCard(
 )
 ```
 
-For the LangGraph agent run from a container, pass `HOST_OVERRIDE` directly:
+Some agents (such as the CrewAI sample) implement a `HOST_OVERRIDE` pattern that accepts a full base URL via environment variable as an alternative to constructing the URL from the bound host and port:
 
-```bash bash
-podman run -p 10000:10000 \
-  -e GOOGLE_API_KEY=your_api_key_here \
-  -e HOST_OVERRIDE=agent.example.com \
-  langgraph-a2a-server
+```python python
+# Pattern used in samples/python/agents/crewai/__main__.py
+agent_host_url = (
+    os.getenv('HOST_OVERRIDE')
+    if os.getenv('HOST_OVERRIDE')
+    else f'http://{host}:{port}/'
+)
+agent_card = AgentCard(url=agent_host_url, ...)
 ```
+
+When implementing your own agent, apply the same approach — read a public-URL variable from the environment and use it as `AgentCard.url` rather than the raw bind address.
 
 ---
 

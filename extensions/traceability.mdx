@@ -19,7 +19,7 @@ This URI is used in the `X-A2A-Extensions` activation header and as the prefix f
 Traceability information is delivered in one of two ways, depending on the agent implementation:
 
 1. **Message or Artifact metadata** — stored under the key:
-   ```
+   ```text
    github.com/a2aproject/a2a-samples/extensions/traceability/v1/traceability
    ```
 2. **Additional artifact** — appended as a separate artifact in the completed task response.
@@ -125,7 +125,7 @@ message Step {
 </ResponseField>
 
 <ResponseField name="call_type" type="CallTypeEnum" required>
-  Either `AGENT` (a call to a downstream A2A agent) or `TOOL` (a call to a local or remote tool/function).
+  The type of operation this step represents. The proto specification defines `AGENT` (a call to a downstream A2A agent) and `TOOL` (a call to a local or remote tool/function). The Python SDK implementation additionally defines `HOST` to represent calls made to or from the host application.
 </ResponseField>
 
 <ResponseField name="step_action" type="StepAction" required>

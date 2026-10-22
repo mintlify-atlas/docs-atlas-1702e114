@@ -1,7 +1,7 @@
 ---
 title: "Go A2A Implementation: Server, Client, and Models"
 sidebarTitle: "Go"
-description: "Explore the Go A2A sample: JSON-RPC 2.0 server and client packages, shared data models, and a runnable helloworld agent with streaming support."
+description: "Go implementation of the A2A protocol: JSON-RPC 2.0 server and client packages, shared data models, and a helloworld agent demonstrating streaming."
 ---
 
 The A2A Go sample provides a complete, idiomatic Go implementation of the Agent-to-Agent protocol built on the standard `net/http` library. It ships with a `server` package for hosting agents, a `client` package for sending tasks, a `models` package with all protocol data structures, and a self-contained `helloworld` agent that demonstrates both streaming and non-streaming communication patterns using Go's native iterators.
@@ -12,7 +12,8 @@ The A2A Go sample provides a complete, idiomatic Go implementation of the Agent-
 
 ## Prerequisites
 
-- Go **1.24** or later (the helloworld agent requires Go 1.25 or higher for native iterator support)
+- Go **1.24** or later for the `server`, `client`, and `models` packages
+- Go **1.25** or later for the `agents/helloworld` agent (uses the `a2a-go/v2` SDK with native iterator support)
 
 ## Project Structure
 
@@ -33,7 +34,7 @@ samples/go/
 
 ## Helloworld Agent
 
-The helloworld agent is the canonical starting point. It starts an HTTP server on port `9999`, registers an AgentCard at `/.well-known/agent-card`, exposes a JSON-RPC endpoint at `/`, and immediately runs a built-in test client to demonstrate the full request/response cycle.
+The helloworld agent is the canonical starting point. It starts an HTTP server on port `9999`, registers an AgentCard at the well-known path (via `a2asrv.WellKnownAgentCardPath`), exposes a JSON-RPC endpoint at `/`, and immediately runs a built-in test client to demonstrate the full request/response cycle.
 
 ### Running the Agent
 
@@ -190,7 +191,7 @@ func (e *HelloWorldAgentExecutor) Cancel(
 
 ## Client Package
 
-The `client` package exposes an `AgentClient` struct with four methods mapping directly to the A2A JSON-RPC methods.
+The `client` package exposes a `Client` struct with four methods mapping directly to the A2A JSON-RPC methods.
 
 ### Client Struct
 
@@ -293,19 +294,21 @@ const (
 
 ### AgentCard
 
+The `AgentCard` type in the `models` package is used by the low-level `server` and `client` packages. Note that the `a2a-go/v2` SDK (used by the helloworld agent) has its own `AgentCard` type with additional fields such as `SupportedInterfaces`.
+
 ```go
 type AgentCard struct {
-    Name               string             `json:"name"`
-    Description        *string            `json:"description,omitempty"`
-    URL                string             `json:"url"`
-    Provider           *AgentProvider     `json:"provider,omitempty"`
-    Version            string             `json:"version"`
-    DocumentationURL   *string            `json:"documentationUrl,omitempty"`
-    Capabilities       AgentCapabilities  `json:"capabilities"`
+    Name               string               `json:"name"`
+    Description        *string              `json:"description,omitempty"`
+    URL                string               `json:"url"`
+    Provider           *AgentProvider       `json:"provider,omitempty"`
+    Version            string               `json:"version"`
+    DocumentationURL   *string              `json:"documentationUrl,omitempty"`
+    Capabilities       AgentCapabilities    `json:"capabilities"`
     Authentication     *AgentAuthentication `json:"authentication,omitempty"`
-    DefaultInputModes  []string           `json:"defaultInputModes,omitempty"`
-    DefaultOutputModes []string           `json:"defaultOutputModes,omitempty"`
-    Skills             []AgentSkill       `json:"skills"`
+    DefaultInputModes  []string             `json:"defaultInputModes,omitempty"`
+    DefaultOutputModes []string             `json:"defaultOutputModes,omitempty"`
+    Skills             []AgentSkill         `json:"skills"`
 }
 ```
 

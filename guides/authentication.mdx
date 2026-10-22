@@ -1,7 +1,7 @@
 ---
-title: "Securing A2A Agents: Authentication Patterns"
+title: "Securing A2A Agents: Bearer and OAuth2 Auth Patterns"
 sidebarTitle: "Authentication"
-description: "Learn how A2A separates agent-level auth from user auth, how to declare security requirements on the AgentCard, and how clients pass bearer tokens or OAuth2 credentials."
+description: "How A2A separates agent-level from user-delegated auth, how to declare security on AgentCard, and how clients pass bearer tokens or OAuth2 credentials."
 ---
 
 Authentication in A2A operates at two distinct layers: the credential an A2A **client** presents to reach an **agent** (agent-level auth), and any further credential the agent may need to act on behalf of a user with a downstream service (user-delegated auth). This page covers both layers, the `AgentAuthentication` field on `AgentCard`, bearer-token and OAuth 2.0 flows, the headless-agent CIBA pattern, and the Java Magic 8-Ball Keycloak sample.
@@ -265,12 +265,12 @@ The Java `magic_8_ball_security` sample shows how to secure an A2A server using 
 
 ```bash bash
 # Start the agent server (auto-provisions Keycloak)
-cd samples/java/agents/magic-8-ball-security/server
+cd samples/java/agents/magic_8_ball_security/server
 export QUARKUS_LANGCHAIN4J_AI_GEMINI_API_KEY=your_api_key_here
 mvn quarkus:dev
 
 # Run the client (connects with Keycloak token)
-cd samples/java/agents/magic-8-ball-security/client/src/main/java/com/samples/a2a/client
+cd samples/java/agents/magic_8_ball_security/client/src/main/java/com/samples/a2a/client
 jbang TestClientRunner.java --server-url http://localhost:11000
 ```
 
@@ -278,10 +278,10 @@ The sample also supports multiple transports on a single port — JSON-RPC (defa
 
 ```bash bash
 # Use REST transport
-jbang TestClientRunner.java --transport rest
+jbang TestClientRunner.java --server-url http://localhost:11000 --transport rest
 
 # Use gRPC transport
-jbang TestClientRunner.java --transport grpc
+jbang TestClientRunner.java --server-url http://localhost:11000 --transport grpc
 ```
 
 ---

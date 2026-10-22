@@ -1,7 +1,7 @@
 ---
 title: "LangGraph Currency Agent with A2A Protocol"
 sidebarTitle: "LangGraph"
-description: "A production-ready A2A agent built with LangGraph's ReAct pattern. Covers multi-turn conversation, real-time streaming, push notifications, and the Frankfurter exchange-rate API."
+description: "A2A currency agent built with LangGraph's ReAct pattern. Covers multi-turn dialogue, real-time streaming, push notifications, and the Frankfurter API."
 ---
 
 The A2A **LangGraph currency agent** sample demonstrates how to wrap a [LangGraph](https://langchain-ai.github.io/langgraph/) ReAct agent as a fully compliant A2A server. It handles real-time currency conversion queries via the free [Frankfurter API](https://www.frankfurter.app/docs/), supports multi-turn dialogue when the user's request is incomplete, streams incremental status updates, and can deliver results via webhook push notifications.
@@ -205,11 +205,37 @@ The `stream` method yields intermediate status dictionaries that the executor tr
         yield self.get_agent_response(config)
 ```
 
-## `app/agent_executor.py` — A2A adapter
-
-`CurrencyAgentExecutor` bridges the LangGraph streaming output to A2A task events:
+`get_agent_response` reads the graph's final `structured_response` value and maps it to the three-valued dict the executor consumes:
 
 ```python
+    def get_agent_response(self, config):
+        current_state = self.graph.get_state(config)
+        structured_response = current_state.values.get('structured_response')
+        if structured_response and isinstance(structured_response, ResponseFormat):
+            if structured_response.status == 'input_required':
+                return {'is_task_complete': False, 'require_user_input': True,
+                        'content': structured_response.message}
+            if structured_response.status == 'error':
+                return {'is_task_complete': False, 'require_user_input': True,
+                        'content': structured_response.message}
+            if structured_response.status == 'completed':
+                return {'is_task_complete': True, 'require_user_input': False,
+                        'content': structured_response.message}
+        return {
+            'is_task_complete': False,
+            'require_user_input': True,
+            'content': 'We are unable to process your request at the moment. Please try again.',
+        }
+```
+
+## `app/agent_executor.py` — A2A adapter
+
+`CurrencyAgentExecutor` bridges the LangGraph streaming output to A2A task events. Imports come from `a2a.server.agent_execution`, `a2a.server.events`, `a2a.server.tasks`, `a2a.types`, and `a2a.utils`:
+
+```python
+from a2a.utils import new_agent_text_message, new_task
+from a2a.utils.errors import ServerError
+
 class CurrencyAgentExecutor(AgentExecutor):
     def __init__(self):
         self.agent = CurrencyAgent()
@@ -253,6 +279,9 @@ class CurrencyAgentExecutor(AgentExecutor):
                 )
                 await updater.complete()
                 break
+
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+        raise ServerError(error=UnsupportedOperationError())
 ```
 
 ### Push notifications in `__main__.py`

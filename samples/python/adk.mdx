@@ -1,7 +1,7 @@
 ---
 title: "Google ADK Agent Samples for A2A Protocol"
 sidebarTitle: "Google ADK"
-description: "Two A2A agent samples built with Google's Agent Development Kit: a currency agent with traceability extensions and an expense reimbursement agent with dynamic form-filling."
+description: "Two A2A samples using Google ADK: a currency agent with traceability extensions and an expense reimbursement agent with multi-turn dynamic form-filling."
 ---
 
 Google's [Agent Development Kit (ADK)](https://github.com/google/adk-python) provides a high-level framework for building agents backed by Gemini models. The A2A repository includes two ADK-based samples that illustrate complementary patterns: a **currency conversion agent** with optional traceability extensions and structured JSON output, and an **expense reimbursement agent** that uses multi-turn form-filling to collect missing details from the caller. Both agents are wrapped with an `AgentExecutor` and served as standard A2A servers.
@@ -39,6 +39,7 @@ samples/python/agents/adk_currency_agent/
 │   ├── agent_card.json    # Static AgentCard served at /.well-known/agent-card.json
 │   ├── main.py            # Entry-point: ADK Runner + A2AStarletteApplication
 │   └── traceability.py    # TraceStep, ResponseTrace, extension URI
+├── agent_eval.ipynb       # Vertex AI evaluation notebook
 └── pyproject.toml
 ```
 
@@ -102,7 +103,7 @@ root_agent = LlmAgent(
     description='Currency Conversion agent',
     instruction=(
         "You are an agent that helps with user's currency conversions. "
-        "Use available tools to help with the conversion. "
+        'Use available tools to help with the conversion. '
         'For currency conversions, do not assume target currencies. '
         'If user did not specify the target currency, ask for it.'
     ),
@@ -132,6 +133,33 @@ async def get_latest_rates(base: str = 'EUR', symbols: str | None = None) -> dic
         )
         response.raise_for_status()
         return response.json()
+
+
+async def get_historical_rates(
+    date: str, base: str | None = None, symbols: str | None = None
+) -> dict:
+    """Retrieve exchange rates for a specific past date (YYYY-MM-DD)."""
+    async with httpx.AsyncClient() as client:
+        params = {}
+        if base:
+            params['base'] = base
+        if symbols:
+            params['symbols'] = symbols
+        response = await client.get(
+            f'https://api.frankfurter.dev/v1/{date}', params=params
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+async def get_time_series_rates(
+    start_date: str,
+    end_date: str | None = None,
+    base: str | None = None,
+    symbols: str | None = None,
+) -> dict:
+    """Retrieve exchange rates over a time period."""
+    ...
 
 
 async def get_available_currencies() -> dict:
@@ -187,6 +215,23 @@ class CurrencyAgentExecutor(AgentExecutor):
                 await self._process_final_response(
                     event, updater, response_trace, task
                 )
+
+    async def ensure_session(self, user_id: str, context_id: str) -> None:
+        """Ensure an ADK session exists for the given user and context ID."""
+        session = await self._runner.session_service.get_session(
+            app_name=self._runner.app_name,
+            user_id=user_id,
+            session_id=context_id,
+        )
+        if session is None:
+            await self._runner.session_service.create_session(
+                app_name=self._runner.app_name,
+                user_id=user_id,
+                session_id=context_id,
+            )
+
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+        raise NotImplementedError('Cancellation is not supported')
 ```
 
 <Info>
@@ -197,6 +242,8 @@ class CurrencyAgentExecutor(AgentExecutor):
 </Info>
 
 ### `main.py` — server entry-point
+
+The entry-point loads the `AgentCard` from `agent_card.json`, constructs an ADK `Runner`, and wires everything into `A2AStarletteApplication`:
 
 ```python
 runner = Runner(
@@ -213,6 +260,7 @@ request_handler = DefaultRequestHandler(
 a2a_app = A2AStarletteApplication(
     agent_card=agent_card, http_handler=request_handler
 )
+app = a2a_app.build()
 ```
 
 ### Traceability extension
@@ -272,9 +320,10 @@ Set your agent URL and Google Cloud project ID in the configuration cell, define
 
 ```text
 samples/python/agents/adk_expense_reimbursement/
+├── __init__.py
+├── __main__.py        # AgentCard, server startup
 ├── agent.py           # ReimbursementAgent: LiteLlm + form tools
 ├── agent_executor.py  # ReimbursementAgentExecutor
-├── __main__.py        # AgentCard, server startup
 └── pyproject.toml
 ```
 
@@ -299,7 +348,10 @@ When a user submits an expense request, the agent:
     ```bash
     echo "GEMINI_API_KEY=your_api_key_here" > .env
     ```
-    The agent uses `LITELLM_MODEL` (defaults to `gemini/gemini-2.0-flash-001`) via LiteLLM, so any LiteLLM-compatible model string can be substituted.
+    The agent uses `LITELLM_MODEL` (defaults to `gemini/gemini-2.0-flash-001`) via LiteLLM, so any LiteLLM-compatible model string can be substituted by setting that variable:
+    ```bash
+    echo "LITELLM_MODEL=gemini/gemini-2.0-flash-001" >> .env
+    ```
   </Step>
   <Step title="Start the server">
     ```bash
@@ -373,6 +425,25 @@ def reimburse(request_id: str) -> dict[str, Any]:
 
 `return_form` sets `tool_context.actions.escalate = True`, which causes ADK to surface the tool response directly to the A2A layer without additional LLM summarization.
 
+The underlying `ReimbursementAgent` is constructed using `LlmAgent` with `LiteLlm` as the model backend:
+
+```python
+from google.adk.agents.llm_agent import LlmAgent
+from google.adk.models.lite_llm import LiteLlm
+
+class ReimbursementAgent:
+    SUPPORTED_CONTENT_TYPES = ['text', 'text/plain']
+
+    def _build_agent(self) -> LlmAgent:
+        LITELLM_MODEL = os.getenv('LITELLM_MODEL', 'gemini/gemini-2.0-flash-001')
+        return LlmAgent(
+            model=LiteLlm(model=LITELLM_MODEL),
+            name='reimbursement_agent',
+            tools=[create_request_form, reimburse, return_form],
+            ...
+        )
+```
+
 ### `agent_executor.py` — handling form responses
 
 The executor distinguishes between three content types returned by the agent stream:
@@ -415,6 +486,13 @@ class ReimbursementAgentExecutor(AgentExecutor):
                         final=True,
                     )
                     continue
+                # Unexpected dict structure — mark as failed
+                await updater.update_status(
+                    TaskState.failed,
+                    new_agent_text_message('Reaching an unexpected state', task.context_id, task.id),
+                    final=True,
+                )
+                break
 
             # Text response — task is complete
             await updater.add_artifact(
@@ -435,7 +513,7 @@ class ReimbursementAgentExecutor(AgentExecutor):
 
 | | ADK Currency Agent | ADK Expense Reimbursement |
 |---|---|---|
-| **LLM** | `gemini-3-flash-preview` via `LlmAgent` | `gemini-2.0-flash-001` via `LiteLlm` |
+| **LLM** | `gemini-3-flash-preview` via `LlmAgent` | `gemini/gemini-2.0-flash-001` via `LiteLlm` |
 | **Multi-turn** | Yes — asks for target currency | Yes — requests missing form fields |
 | **Output type** | Text artifact | Text artifact or `DataPart` form |
 | **Traceability** | Yes (opt-in via extension header) | No |
