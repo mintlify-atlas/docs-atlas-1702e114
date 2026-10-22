@@ -1,0 +1,129 @@
+---
+title: "JavaScript (Node.js) A2A Samples with Genkit"
+sidebarTitle: "JavaScript"
+description: "Run A2A-compliant agents in Node.js using Genkit and the Gemini API. Covers three sample agents — Movie, Coder, and Content Editor — plus the CLI client."
+---
+
+The A2A JavaScript samples demonstrate how to build and run Agent-to-Agent protocol-compatible agents on Node.js using [Genkit](https://genkit.dev/) and the Gemini API. Three complete sample agents are provided — a Movie information agent powered by TMDB, a Coder agent that emits full code files as artifacts, and a Content Editor agent that proofreads and polishes text — alongside a command-line client you can use to send messages to any running agent.
+
+<Warning>
+  This is sample code intended for demonstration purposes only. It is not a production-quality library. Treat any data received from external agents — including AgentCards, messages, and artifacts — as untrusted input. Sanitize all fields before constructing LLM prompts to prevent prompt injection attacks.
+</Warning>
+
+## Prerequisites
+
+- Node.js 18 or later
+- A Gemini API key — obtain one from [Google AI Studio](https://aistudio.google.com/)
+- For the Movie Agent: a [TMDB API key](https://developer.themoviedb.org/docs/getting-started)
+
+## Setup
+
+<Steps>
+  <Step title="Navigate to the JavaScript samples directory">
+    ```bash
+    cd samples/js
+    ```
+  </Step>
+  <Step title="Install dependencies">
+    ```bash
+    npm install
+    ```
+  </Step>
+  <Step title="Export your Gemini API key">
+    ```bash
+    export GEMINI_API_KEY=<your_api_key>
+    ```
+  </Step>
+</Steps>
+
+## Sample Agents
+
+<CardGroup cols={3}>
+  <Card title="Movie Agent" icon="film">
+    Uses the TMDB API to search for movie information and answer natural-language questions about films. Runs on `http://localhost:41241`.
+  </Card>
+  <Card title="Coder Agent" icon="code">
+    Generates complete, runnable code files and emits them as A2A artifacts. Runs on `http://localhost:41241`.
+  </Card>
+  <Card title="Content Editor Agent" icon="pen-nib">
+    Proofreads and polishes written content. Runs on port `10003` by default and integrates with the multi-agent `content_creation` host.
+  </Card>
+</CardGroup>
+
+## Running an Agent
+
+Each agent is started with a corresponding `npm run` script. Open two terminals: one for the agent server and one for the CLI client.
+
+<Tabs>
+  <Tab title="Coder Agent">
+    ```bash
+    # Terminal 1 — start the agent server
+    export GEMINI_API_KEY=<your_api_key>
+    npm run agents:coder
+
+    # Terminal 2 — start the CLI client
+    npm run a2a:cli
+    ```
+  </Tab>
+  <Tab title="Movie Agent">
+    ```bash
+    # Terminal 1 — start the agent server
+    export TMDB_API_KEY=<tmdb_api_key>
+    export GEMINI_API_KEY=<your_api_key>
+    npm run agents:movie-agent
+
+    # Terminal 2 — start the CLI client
+    npm run a2a:cli
+    ```
+  </Tab>
+  <Tab title="Content Editor Agent">
+    ```bash
+    # Terminal 1 — set env vars and start the agent
+    cd samples/js
+    echo "GOOGLE_API_KEY=your_api_key_here" > .env
+    npm run agents:content-editor
+
+    # Terminal 2 — start the CLI client
+    npm run a2a:cli
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+  Override the Content Editor Agent's port by exporting `CONTENT_EDITOR_AGENT_PORT=YOUR_PORT` before running `npm run agents:content-editor`.
+</Tip>
+
+## CLI Client
+
+The CLI client (`cli.ts`) is a command-line A2A host that connects to any running agent and lets you send messages interactively. Start it with:
+
+```bash
+npx tsx ./cli.ts
+```
+
+Or use the npm shortcut:
+
+```bash
+npm run a2a:cli
+```
+
+The client reads the agent's AgentCard from `/.well-known/agent.json`, then sends your typed messages as `message/send` JSON-RPC requests and prints the agent's response.
+
+## Agent Ports Reference
+
+| Agent | Default Port |
+|-------|-------------|
+| Movie Agent | `41241` |
+| Coder Agent | `41241` |
+| Content Editor Agent | `10003` |
+
+## Multi-Agent Integration
+
+The Content Editor Agent is designed to participate in multi-agent pipelines. To use it as part of a content-creation workflow alongside a Python Content Writer agent, see the `samples/python/hosts/content_creation` sample.
+
+```bash
+# After starting the Content Editor Agent on port 10003,
+# run the Python content_creation host to wire agents together
+cd samples/python/hosts/content_creation
+uv run .
+```

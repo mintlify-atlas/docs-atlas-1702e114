@@ -1,0 +1,250 @@
+---
+title: "A2A CLI Host: Interactive Terminal Client"
+sidebarTitle: "CLI Host"
+description: "The CLI host is a terminal-based A2A client that resolves AgentCards, exchanges tasks in a REPL loop, and supports streaming, push notifications, and file attachments."
+---
+
+The A2A CLI host is a small but fully-featured host application that demonstrates the complete capabilities of the `A2AClient`. It lives at `samples/python/hosts/cli/` and provides an interactive read-evaluate-print loop (REPL) for sending messages to any running A2A server. On startup it fetches the server's `AgentCard`, then enters a loop where each user prompt becomes a new `Message` sent to the remote agent. All responses — streaming events, task status updates, and artifacts — are printed to the console as they arrive.
+
+## Prerequisites
+
+- Python 3.12 or higher
+- [uv](https://docs.astral.sh/uv/) package manager
+- A running A2A server (see the [helloworld agent](/samples/python/helloworld) quickstart)
+
+## Running the CLI Host
+
+<Steps>
+  <Step title="Navigate to the CLI directory">
+    ```bash
+    cd samples/python/hosts/cli
+    ```
+  </Step>
+  <Step title="Start an agent server (in a separate terminal)">
+    ```bash
+    cd samples/python/agents/helloworld
+    uv run .
+    ```
+    This starts a local A2A server on port `10010` by default.
+  </Step>
+  <Step title="Run the CLI host">
+    ```bash
+    uv run . --agent http://localhost:10010
+    ```
+    The CLI resolves the AgentCard, prints it, and then prompts you for input.
+  </Step>
+</Steps>
+
+### Expected Startup Output
+
+```text
+Will use headers: {}
+======= Agent Card ========
+{"name":"Hello World Agent","description":"A simple hello world agent ...","url":"http://localhost:10010/","version":"1.0.0",...}
+=========  starting a new task ========
+
+What do you want to send to the agent? (:q or quit to exit):
+```
+
+Type any message and press **Enter**. The agent's response is printed after each exchange. Type `:q` or `quit` to exit the loop.
+
+## Command-Line Options
+
+All options are defined in `__main__.py` using `asyncclick`:
+
+<ParamField path="--agent" type="string" default="http://localhost:8083">
+  Base URL of the A2A server to connect to. The CLI appends `/.well-known/agent.json` automatically for card resolution.
+</ParamField>
+
+<ParamField path="--bearer-token" type="string">
+  Bearer token sent in the `Authorization` header. Can also be set via the `A2A_CLI_BEARER_TOKEN` environment variable.
+</ParamField>
+
+<ParamField path="--session" type="integer" default="0">
+  Reuse an existing session by numeric ID. When `0`, a new UUID context is generated for each run.
+</ParamField>
+
+<ParamField path="--history" type="boolean" default="false">
+  After each completed task, fetch and print the last 10 messages of task history.
+</ParamField>
+
+<ParamField path="--use_push_notifications" type="boolean" default="false">
+  Enable push-notification delivery for task status updates.
+</ParamField>
+
+<ParamField path="--push_notification_receiver" type="string" default="http://localhost:5000">
+  URL of the local push-notification listener that will receive `POST /notify` callbacks.
+</ParamField>
+
+<ParamField path="--header" type="string">
+  Extra HTTP headers in `Key=Value` format. Can be specified multiple times.
+</ParamField>
+
+<ParamField path="--enabled_extensions" type="string">
+  Comma-separated list of A2A extension URIs to enable. Sets the `X-A2A-Extensions` request header so the server knows which extensions to activate.
+</ParamField>
+
+## Connecting to a Remote Agent
+
+```bash
+# Public cloud-hosted sample agent
+uv run . --agent https://sample-a2a-agent-908687846511.us-central1.run.app
+
+# Local multi-agent host (port 8083)
+uv run . --agent http://localhost:8083
+
+# With a bearer token and traceability extension
+uv run . \
+  --agent http://localhost:8083 \
+  --bearer-token "$MY_TOKEN" \
+  --enabled_extensions "https://example.com/traceability/v1"
+```
+
+## Streaming Support
+
+The CLI auto-detects whether the remote agent supports streaming by inspecting `card.capabilities.streaming` from the resolved `AgentCard`. No configuration is required.
+
+<Tabs>
+  <Tab title="Streaming path">
+    When `streaming=True`, the CLI calls `client.send_message_streaming()` and iterates over server-sent events:
+
+    ```python
+    response_stream = client.send_message_streaming(
+        SendStreamingMessageRequest(
+            id=str(uuid4()),
+            params=payload,
+        )
+    )
+    async for result in response_stream:
+        if isinstance(result.root, JSONRPCErrorResponse):
+            print(
+                f'Error: {result.root.error}, context_id: {context_id}, task_id: {task_id}'
+            )
+            return False, context_id, task_id
+        event = result.root.result
+        context_id = event.context_id
+        if isinstance(event, Task):
+            task_id = event.id
+        elif isinstance(event, TaskStatusUpdateEvent) or isinstance(
+            event, TaskArtifactUpdateEvent
+        ):
+            task_id = event.task_id
+            if (
+                isinstance(event, TaskStatusUpdateEvent)
+                and event.status.state == 'completed'
+            ):
+                task_completed = True
+        elif isinstance(event, Message):
+            message = event
+        print(f'stream event => {event.model_dump_json(exclude_none=True)}')
+    ```
+
+    Each incoming event is printed immediately as `stream event => {...}`.
+  </Tab>
+  <Tab title="Non-streaming path">
+    When `streaming=False`, the CLI calls `client.send_message()` and waits for the full response:
+
+    ```python
+    event = await client.send_message(
+        SendMessageRequest(
+            id=str(uuid4()),
+            params=payload,
+        )
+    )
+    event = event.root.result
+    ```
+
+    The complete task or message object is printed after the call returns.
+  </Tab>
+</Tabs>
+
+## File Attachments
+
+After entering a text prompt, the CLI optionally asks for a file path. If provided, the file is base64-encoded and attached as a `FilePart` alongside the `TextPart`:
+
+```python
+with open(file_path, 'rb') as f:
+    file_content = base64.b64encode(f.read()).decode('utf-8')
+    file_name = os.path.basename(file_path)
+
+message.parts.append(
+    Part(
+        root=FilePart(
+            file=FileWithBytes(name=file_name, bytes=file_content)
+        )
+    )
+)
+```
+
+Press **Enter** without a path to skip file attachment.
+
+## Push Notifications
+
+When `--use_push_notifications true` is passed, the CLI starts a `PushNotificationListener` on the configured receiver port and includes a `pushNotification` configuration in every message payload:
+
+```python
+if use_push_notifications:
+    from hosts.cli.push_notification_listener import (
+        PushNotificationListener,
+    )
+
+    push_notification_listener = PushNotificationListener(
+        host=notification_receiver_host,
+        port=notification_receiver_port,
+    )
+    push_notification_listener.start()
+```
+
+The push notification payload sent to the server references the local listener:
+
+```python
+payload['pushNotification'] = {
+    'url': f'http://{notification_receiver_host}:{notification_receiver_port}/notify',
+    'authentication': {
+        'schemes': ['bearer'],
+    },
+}
+```
+
+The listener handles `POST /notify` callbacks from the server when task states change, enabling asynchronous status delivery without polling.
+
+## Multi-Turn Conversations and `input_required`
+
+The CLI handles the full A2A task state lifecycle automatically. When a completed task returns the state `input_required`, the CLI re-enters the `completeTask` loop, preserving the same `task_id` and `context_id` so the agent maintains conversation continuity:
+
+```python
+state = TaskState(taskResult.status.state)
+if state.name == TaskState.input_required.name:
+    return (
+        await completeTask(
+            client,
+            streaming,
+            use_push_notifications,
+            notification_receiver_host,
+            notification_receiver_port,
+            task_id,
+            context_id,
+        ),
+        context_id,
+        task_id,
+    )
+```
+
+## Task History
+
+With `--history true`, after each completed task the CLI calls `client.get_task()` to retrieve the last 10 messages:
+
+```python
+task_response = await client.get_task(
+    {'id': task_id, 'historyLength': 10}
+)
+print(
+    task_response.model_dump_json(
+        include={'result': {'history': True}}
+    )
+)
+```
+
+<Warning>
+  The CLI host is a demonstration tool. Before building on it for production use, sanitize all text received from remote agents before logging it, displaying it in a UI, or using it as context for further LLM calls.
+</Warning>

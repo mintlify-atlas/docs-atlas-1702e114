@@ -1,0 +1,273 @@
+---
+title: "A2A Push Notifications: Webhook-Based Task Updates"
+sidebarTitle: "Push Notifications"
+description: "Configure webhook callbacks for long-running A2A tasks — covering PushNotificationConfig schema, JWK token validation, server setup, and the listener pattern."
+---
+
+Push notifications in A2A allow a **client** to register a webhook URL so the **agent server** can deliver task-state updates asynchronously. This is especially useful for long-running tasks where holding an HTTP connection open is impractical. Instead of polling, the client starts a lightweight HTTP listener, passes its URL when sending a task, and the server POSTs `TaskStatusUpdateEvent` and `TaskArtifactUpdateEvent` payloads to that URL as work progresses.
+
+<Note>
+  An agent must declare `push_notifications: true` in its `AgentCapabilities` for clients to know push notifications are supported. Check `agentCard.capabilities.pushNotifications` before registering a webhook.
+</Note>
+
+---
+
+## Advertising Push Notification Support
+
+Agents opt into push notifications by setting the `push_notifications` flag on their `AgentCapabilities`. The LangGraph currency agent does this in its `__main__.py`:
+
+```python python
+# samples/python/agents/langgraph/app/__main__.py
+capabilities = AgentCapabilities(streaming=True, push_notifications=True)
+
+agent_card = AgentCard(
+    name='Currency Agent',
+    description='Helps with exchange rates for currencies',
+    url=f'http://{host}:{port}/',
+    version='1.0.0',
+    default_input_modes=CurrencyAgent.SUPPORTED_CONTENT_TYPES,
+    default_output_modes=CurrencyAgent.SUPPORTED_CONTENT_TYPES,
+    capabilities=capabilities,
+    skills=[skill],
+)
+```
+
+---
+
+## PushNotificationConfig Schema
+
+When a client sends a task it includes a `pushNotification` object inside the `MessageSendParams` payload. The server stores this config and uses it to call back the client.
+
+<ParamField body="url" type="string" required>
+  The webhook URL the server will POST task-update events to. Must be reachable from the agent server.
+</ParamField>
+
+<ParamField body="token" type="string">
+  An opaque string the server echoes back in a custom header or query parameter so the client can verify the callback came from the expected agent.
+</ParamField>
+
+<ParamField body="authentication" type="object">
+  Describes how the server should authenticate its outbound webhook calls.
+
+  <Expandable title="authentication fields">
+    <ParamField body="schemes" type="string[]">
+      The auth schemes the client webhook endpoint accepts, e.g. `["bearer"]`.
+    </ParamField>
+    <ParamField body="credentials" type="string">
+      Scheme-specific credential data encoded as a JSON string.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Example: Registering a Webhook with `message/send`
+
+```json json
+{
+  "jsonrpc": "2.0",
+  "id": "abc-123",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "kind": "message",
+      "messageId": "msg-001",
+      "role": "user",
+      "parts": [
+        { "kind": "text", "text": "What is 100 USD in EUR?" }
+      ]
+    },
+    "configuration": {
+      "acceptedOutputModes": ["text"]
+    },
+    "pushNotification": {
+      "url": "http://localhost:5000/notify",
+      "authentication": {
+        "schemes": ["bearer"]
+      }
+    }
+  }
+}
+```
+
+The CLI host builds this exact structure when `--use_push_notifications` is enabled:
+
+```python python
+# samples/python/hosts/cli/__main__.py
+if use_push_notifications:
+    payload['pushNotification'] = {
+        'url': f'http://{notification_receiver_host}:{notification_receiver_port}/notify',
+        'authentication': {
+            'schemes': ['bearer'],
+        },
+    }
+```
+
+---
+
+## Enabling Push Notifications on the Server
+
+The server wires together a `PushNotificationConfigStore` and a `BasePushNotificationSender`, then passes them to the `DefaultRequestHandler`. The handler takes care of storing per-task webhook configs and dispatching callbacks as the task progresses.
+
+```python python
+# samples/python/agents/langgraph/app/__main__.py
+
+httpx_client = httpx.AsyncClient()
+push_config_store = InMemoryPushNotificationConfigStore()
+push_sender = BasePushNotificationSender(
+    httpx_client=httpx_client,
+    config_store=push_config_store,
+)
+request_handler = DefaultRequestHandler(
+    agent_executor=CurrencyAgentExecutor(),
+    task_store=InMemoryTaskStore(),
+    push_config_store=push_config_store,
+    push_sender=push_sender,
+)
+server = A2AStarletteApplication(
+    agent_card=agent_card, http_handler=request_handler
+)
+
+uvicorn.run(server.build(), host=host, port=port)
+```
+
+<Tip>
+  `InMemoryPushNotificationConfigStore` stores webhook URLs in process memory. For multi-replica deployments, swap this for a shared store backed by Redis, a database, or another distributed key-value system so all replicas can look up the webhook URL for any task.
+</Tip>
+
+---
+
+## How the Server Sends Updates
+
+The `BasePushNotificationSender` POSTs a JSON body to the registered webhook URL whenever a `TaskStatusUpdateEvent` or `TaskArtifactUpdateEvent` is enqueued. The payload mirrors the same event objects the agent emits over streaming:
+
+```json json
+{
+  "taskId": "58124b63-dd3b-46b8-bf1d-1cc1aefd1c8f",
+  "contextId": "e329f200-eaf4-4ae9-a8ef-a33cf9485367",
+  "kind": "status-update",
+  "status": {
+    "state": "working",
+    "message": {
+      "kind": "message",
+      "role": "agent",
+      "parts": [{ "kind": "text", "text": "Looking up exchange rates..." }]
+    }
+  },
+  "final": false
+}
+```
+
+When the task completes, the server sends a final event with `"final": true` and `"state": "completed"`.
+
+---
+
+## Client: The Push Notification Listener
+
+The client-side listener is a minimal Starlette application that runs in a background thread so it doesn't block the interactive prompt. It exposes two routes:
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/notify` | `GET` | JWK webhook validation — echoes back the `validationToken` query parameter |
+| `/notify` | `POST` | Receives task-update payloads from the agent server |
+
+```python python
+# samples/python/hosts/cli/push_notification_listener.py
+
+class PushNotificationListener:
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(
+            target=lambda loop: loop.run_forever(), args=(self.loop,)
+        )
+        self.thread.daemon = True
+        self.thread.start()
+
+    def start(self):
+        asyncio.run_coroutine_threadsafe(
+            self.start_server(),
+            self.loop,
+        )
+        print('======= push notification listener started =======')
+
+    async def start_server(self):
+        self.app = Starlette()
+        self.app.add_route(
+            '/notify', self.handle_notification, methods=['POST']
+        )
+        self.app.add_route(
+            '/notify', self.handle_validation_check, methods=['GET']
+        )
+        config = uvicorn.Config(
+            self.app, host=self.host, port=self.port, log_level='critical'
+        )
+        self.server = uvicorn.Server(config)
+        await self.server.serve()
+
+    async def handle_validation_check(self, request: Request):
+        validation_token = request.query_params.get('validationToken')
+        if not validation_token:
+            return Response(status_code=400)
+        return Response(content=validation_token, status_code=200)
+
+    async def handle_notification(self, request: Request):
+        data = await request.json()
+        print(f'\npush notification received => \n{data}\n')
+        return Response(status_code=200)
+```
+
+Start the listener then pass its address to the CLI:
+
+```bash bash
+# From the CLI host directory
+cd samples/python/hosts/cli
+
+uv run . \
+  --agent http://localhost:10000 \
+  --use_push_notifications true \
+  --push_notification_receiver http://localhost:5000
+```
+
+---
+
+## JWK Webhook Verification
+
+Before delivering the first notification, the A2A server performs a validation handshake. It sends a `GET` request to the webhook URL with a `validationToken` query parameter. The client must respond with `200 OK` and echo the token back in the response body. This pattern, modelled on webhook validation in cloud messaging systems, prevents third parties from registering arbitrary URLs as webhook targets.
+
+```
+GET http://localhost:5000/notify?validationToken=some-random-opaque-string
+```
+
+```
+200 OK
+Content-Type: text/plain
+
+some-random-opaque-string
+```
+
+The listener's `handle_validation_check` method (shown above) handles this automatically.
+
+---
+
+## Validating Push Config in the Agent Executor
+
+Agent executors should verify that a supplied push notification config is well-formed before beginning long-running work. The LlamaIndex file-chat executor demonstrates this pattern:
+
+```python python
+# samples/python/agents/llama_index_file_chat/agent_executor.py
+
+def _validate_push_config(self, context: RequestContext) -> bool:
+    push_notification_config = (
+        context.configuration.push_notification_config
+        if context.configuration
+        else None
+    )
+    if push_notification_config and not push_notification_config.url:
+        logger.warning('Push notification URL is missing')
+        return True  # True means invalid
+    return False
+```
+
+<Warning>
+  Never send sensitive task results to an unverified webhook URL. Always complete the `validationToken` handshake before dispatching payloads, and consider signing outbound webhook calls with a shared secret or a JWK-based signature scheme.
+</Warning>

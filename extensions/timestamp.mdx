@@ -1,0 +1,180 @@
+---
+title: "Timestamp Extension for A2A Messages and Artifacts"
+sidebarTitle: "Timestamp"
+description: "Add RFC 3339 UTC creation timestamps to A2A Message and Artifact metadata. Covers the extension URI, metadata key format, and activation via HTTP header."
+---
+
+The Timestamp extension for Agent2Agent adds creation-time metadata to `Message` and `Artifact` objects. When a client activates this extension, the serving agent stamps every outgoing message and artifact with a precise UTC timestamp, enabling consumers to reason about message ordering, replay freshness, and SLA compliance without relying on transport-layer timestamps.
+
+## Extension URI
+
+```text
+https://github.com/a2aproject/a2a-samples/extensions/timestamp/v1
+```
+
+This URI is used in two ways: as the value in the `X-A2A-Extensions` activation header, and as the prefix for the metadata field key embedded in each stamped object.
+
+## Timestamp Format
+
+All timestamps produced by this extension **MUST** conform to [RFC 3339](https://datatracker.ietf.org/doc/html/rfc3339) and be expressed in the **UTC time zone**. Timestamps must provide at least **second-level precision**; the maximum supported precision is **nanoseconds**.
+
+```text
+2024-11-15T09:23:47.381924Z
+```
+
+<Note>
+  The Python implementation uses `datetime.datetime.fromtimestamp(now, datetime.UTC).isoformat()`, which always produces a compliant UTC string.
+</Note>
+
+## Metadata Field Key
+
+Timestamps are stored in the `metadata` map of a `Message` or `Artifact` under the following key:
+
+```text
+github.com/a2aproject/a2a-samples/extensions/timestamp/v1/timestamp
+```
+
+Note that this key omits the leading `https://` scheme — only the path component is used as the metadata dictionary key.
+
+The Python constant from the SDK is:
+
+```python
+_CORE_PATH = 'github.com/a2aproject/a2a-samples/extensions/timestamp/v1'
+URI = f'https://{_CORE_PATH}'
+TIMESTAMP_FIELD = f'{_CORE_PATH}/timestamp'
+```
+
+### Example Stamped Message Metadata
+
+```json
+{
+  "messageId": "msg-789",
+  "role": "agent",
+  "parts": [
+    { "kind": "text", "content": "Here is your flight summary." }
+  ],
+  "metadata": {
+    "github.com/a2aproject/a2a-samples/extensions/timestamp/v1/timestamp": "2024-11-15T09:23:47.381924Z"
+  }
+}
+```
+
+## Activating the Extension
+
+Clients request timestamps by including the extension URI in the `X-A2A-Extensions` HTTP header on each call. The server only stamps objects in responses to requests that carry this header.
+
+```http
+POST /tasks/send HTTP/1.1
+Host: agent.example.com
+Content-Type: application/json
+X-A2A-Extensions: https://github.com/a2aproject/a2a-samples/extensions/timestamp/v1
+```
+
+For gRPC transports, pass the same URI as the `X-A2A-Extensions` metadata value.
+
+## Declaring Support in AgentCard
+
+An agent that supports the Timestamp extension declares it in its `AgentCapabilities.extensions` array. The Python SDK helper generates the `AgentExtension` object directly:
+
+```python
+from timestamp_ext import TimestampExtension
+
+ext = TimestampExtension()
+
+# Option 1: get the AgentExtension object and add it yourself
+agent_extension = ext.agent_extension()
+
+# Option 2: let the helper add it to the card in-place
+card = ext.add_to_card(card)
+```
+
+The resulting AgentCard entry looks like:
+
+```json
+{
+  "capabilities": {
+    "extensions": [
+      {
+        "uri": "https://github.com/a2aproject/a2a-samples/extensions/timestamp/v1",
+        "description": "Adds timestamps to messages and artifacts."
+      }
+    ]
+  }
+}
+```
+
+## Python SDK Integration
+
+The `TimestampExtension` class in `samples/python/extensions/timestamp/` offers five progressive levels of integration, from fully manual to fully automated.
+
+<Tabs>
+  <Tab title="Manual (self-serve)">
+    Add a timestamp directly to any message or artifact object:
+
+    ```python
+    from timestamp_ext import TimestampExtension
+
+    ext = TimestampExtension()
+
+    # Stamps the message; existing timestamps are preserved.
+    ext.add_timestamp(message)
+    ```
+  </Tab>
+  <Tab title="Request-aware">
+    Add a timestamp only when the client has activated the extension:
+
+    ```python
+    from timestamp_ext import TimestampExtension
+
+    ext = TimestampExtension()
+
+    # context is the RequestContext from the agent executor
+    ext.add_if_requested(message, context)
+    ```
+  </Tab>
+  <Tab title="Executor decorator">
+    Wrap the entire `AgentExecutor` so timestamps are applied automatically to every outgoing event:
+
+    ```python
+    from timestamp_ext import TimestampExtension
+
+    ext = TimestampExtension()
+    executor = ext.wrap_executor(my_agent_executor)
+    ```
+  </Tab>
+  <Tab title="Client interceptor">
+    Apply timestamps and inject the activation header on all outgoing requests:
+
+    ```python
+    from timestamp_ext import TimestampExtension
+
+    ext = TimestampExtension()
+    client = ext.wrap_client(a2a_client)
+
+    # All send_message calls now stamp the outgoing message and
+    # add X-A2A-Extensions to the request headers.
+    ```
+  </Tab>
+</Tabs>
+
+### Reading a Timestamp
+
+```python
+from timestamp_ext import TimestampExtension
+import datetime
+
+ext = TimestampExtension()
+
+ts: datetime.datetime | None = ext.get_timestamp(message)
+if ts:
+    age_seconds = (datetime.datetime.now(datetime.UTC) - ts).total_seconds()
+    print(f"Message is {age_seconds:.1f}s old")
+```
+
+## Timestamp Generation Semantics
+
+A timestamp added to a `Message` or `Artifact` **MUST** represent the time at which that object was created — not the time it was received, queued, or read. Existing timestamps are never overwritten; if `has_timestamp(obj)` returns `True`, the add methods are no-ops.
+
+<Tip>
+  Use the `MessageTimestamper` helper returned by `ext.get_timestamper(context)` when you need a single object that conditionally stamps based on the current request context. It is the lightest integration option for executor code that builds messages in multiple places.
+</Tip>

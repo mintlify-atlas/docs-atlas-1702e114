@@ -1,0 +1,364 @@
+---
+title: "A2A Jupyter Notebooks: Quickstart, Evaluation, and Concepts"
+sidebarTitle: "Notebooks"
+description: "Four Jupyter notebooks covering A2A quickstart, Vertex AI agent evaluation, multi-agent Cloud Run deployment, and the task-vs-message protocol difference."
+---
+
+The A2A project ships a set of Jupyter notebooks that let you explore the protocol end-to-end without building a full application first. Each notebook is self-contained and can be opened directly in Google Colab, Vertex AI Workbench, BigQuery Studio, or run locally with `uv`. The notebooks live in the `notebooks/` directory of the repository.
+
+<Note>
+  All notebooks are also available as a ready-to-run Firebase Studio project. Click the link below to open the full A2A samples collection in a managed notebook environment:
+
+  [**Open in Firebase Studio →**](https://studio.firebase.google.com/new?template=https%3A%2F%2Fgithub.com%2Fa2aproject%2Fa2a-samples%2Ftree%2Fmain)
+</Note>
+
+## Available Notebooks
+
+<CardGroup cols={2}>
+  <Card title="A2A Quickstart" icon="rocket" href="#a2a-quickstart">
+    Build a three-agent trending-topics system end-to-end. Covers agent definition, A2A server setup, client communication, and streaming.
+  </Card>
+  <Card title="A2A Evaluation" icon="chart-bar" href="#a2a-evaluation">
+    Evaluate a Reimbursement A2A Agent using Vertex AI Evaluation services with an in-memory server.
+  </Card>
+  <Card title="Multi-Agent Eval with Cloud Run" icon="cloud" href="#multi-agent-evaluation-with-cloud-run">
+    Deploy A2A agents to Cloud Run and run end-to-end multi-agent evaluation with Vertex AI.
+  </Card>
+  <Card title="Task vs. Message" icon="arrows-split-up-and-left" href="#task-vs-message">
+    Illustrates the conceptual and protocol-level difference between A2A tasks and messages with runnable examples.
+  </Card>
+</CardGroup>
+
+---
+
+## A2A Quickstart
+
+**File:** `notebooks/a2a_quickstart.ipynb`
+
+This notebook introduces Google's Agent-to-Agent (A2A) protocol and walks you through building a complete three-agent system from scratch — all within a single notebook session.
+
+### What you'll build
+
+A coordinated pipeline of three agents that analyse trending topics:
+
+1. **Trending Topics Agent** — searches the web for current trending topics
+2. **Trend Analyzer Agent** — performs deep analysis with quantitative data
+3. **Host Agent** — orchestrates the specialist agents and synthesises a final response for the user
+
+### Open in a hosted environment
+
+<CardGroup cols={4}>
+  <Card title="Google Colab" icon="google" href="https://colab.research.google.com/github/a2aproject/a2a-samples/blob/main/notebooks/a2a_quickstart.ipynb">
+    Open in Colab
+  </Card>
+  <Card title="Colab Enterprise" icon="building" href="https://console.cloud.google.com/vertex-ai/colab/import/https:%2F%2Fraw.githubusercontent.com%2Fa2aproject%2Fa2a-samples%2Fmain%2Fnotebooks%2Fa2a_quickstart.ipynb">
+    Open in Colab Enterprise
+  </Card>
+  <Card title="Vertex AI Workbench" icon="server" href="https://console.cloud.google.com/vertex-ai/workbench/deploy-notebook?download_url=https://raw.githubusercontent.com/a2aproject/a2a-samples/main/notebooks/a2a_quickstart.ipynb">
+    Open in Workbench
+  </Card>
+  <Card title="BigQuery Studio" icon="database" href="https://console.cloud.google.com/bigquery/import?url=https://github.com/a2aproject/a2a-samples/blob/main/notebooks/a2a_quickstart.ipynb">
+    Open in BigQuery Studio
+  </Card>
+</CardGroup>
+
+### Prerequisites
+
+- Python 3.11+
+- A Google Cloud project with Vertex AI enabled
+- Basic familiarity with async Python
+
+### Key concepts covered
+
+- Defining `AgentCard` and `AgentSkill` metadata
+- Implementing `AgentExecutor` with `execute` and `cancel` methods
+- Launching an `A2AStarletteApplication` server in a background thread
+- Using `A2AClient` and `ClientFactory` to send messages and stream responses
+- Configuring `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` for Vertex AI
+
+### Dependencies installed by the notebook
+
+```python
+# Install required packages
+%pip install --upgrade -q google-genai google-adk==1.9.0 a2a-sdk==0.3.0 \
+    python-dotenv aiohttp uvicorn requests mermaid-python nest-asyncio
+```
+
+### Sample: creating and sending an A2A message
+
+The quickstart wires up an `A2AClient`, constructs a `Message`, and streams events back from the server:
+
+```python
+from a2a.client import ClientConfig, ClientFactory, create_text_message_object
+from a2a.server.apps import A2AStarletteApplication
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore
+from a2a.types import (
+    AgentCapabilities,
+    AgentCard,
+    AgentSkill,
+    TransportProtocol,
+)
+```
+
+---
+
+## A2A Evaluation
+
+**File:** `notebooks/a2a_evaluation.ipynb`
+
+This notebook demonstrates how to evaluate a Reimbursement A2A Agent using **Vertex AI Evaluation** services. It runs the agent entirely in memory — no external server deployment is required — making it straightforward to iterate on agent logic and immediately measure quality.
+
+### What you'll build
+
+A complete evaluation pipeline for a multi-step booking/reimbursement agent:
+
+1. **RouterAgent** — classifies user intent (`BOOK_FLIGHT`, `BOOK_HOTEL`, or `NONE`)
+2. **BookingAgentExecutor** — delegates to the router and returns structured responses
+3. **Evaluation harness** — sends a test dataset through the agent and scores responses with Vertex AI metrics (`coherence`, `groundedness`, `tool-call accuracy`)
+
+### Open in a hosted environment
+
+<CardGroup cols={3}>
+  <Card title="Google Colab" icon="google" href="https://colab.research.google.com/github/a2aproject/a2a-samples/blob/main/notebooks/a2a_evaluation.ipynb">
+    Open in Colab
+  </Card>
+  <Card title="Colab Enterprise" icon="building" href="https://console.cloud.google.com/vertex-ai/colab/import/https:%2F%2Fraw.githubusercontent.com%2Fa2aproject%2Fa2a-samples%2Fmain%2Fnotebooks%2Fa2a_evaluation.ipynb">
+    Open in Colab Enterprise
+  </Card>
+  <Card title="Vertex AI Workbench" icon="server" href="https://console.cloud.google.com/vertex-ai/workbench/deploy-notebook?download_url=https://raw.githubusercontent.com/a2aproject/a2a-samples/main/notebooks/a2a_evaluation.ipynb">
+    Open in Workbench
+  </Card>
+</CardGroup>
+
+### Prerequisites
+
+- A Google Cloud project with the Vertex AI API enabled
+- A `ReimbursementAgentExecutor` class with an `async execute` method
+
+### Dependencies installed by the notebook
+
+```python
+%pip install --upgrade --quiet scikit-learn pandas tqdm plotly \
+    google-cloud-aiplatform httpx "a2a-sdk==0.3.0" "google-adk==1.2.0"
+```
+
+### Sample: streaming a message through the in-memory handler
+
+```python
+async def send_message(query: str = "hi"):
+    task_id = None
+    context_id = None
+
+    user_message = Message(
+        role=Role.user,
+        parts=[Part(root=TextPart(text=query))],
+        message_id=str(uuid.uuid4()),
+        task_id=task_id,
+        context_id=context_id,
+    )
+    params = MessageSendParams(message=user_message)
+    response_stream = request_handler.on_message_send_stream(params=params)
+
+    async for ev in response_stream:
+        pp.pprint(ev.model_dump(exclude_none=True))
+
+await send_message("hey, could you help book my trip")
+```
+
+---
+
+## Multi-Agent Evaluation with Cloud Run
+
+**File:** `notebooks/multi_agents_eval_with_cloud_run_deployment.ipynb`
+
+This notebook goes further than the in-memory evaluation approach: it containerises multiple A2A agents, deploys them to **Google Cloud Run**, and then evaluates the full multi-agent system end-to-end using Vertex AI Evaluation.
+
+### What you'll build
+
+A production-style evaluation pipeline in three stages:
+
+1. **Deploying A2A agents to Cloud Run** — containerise your Python-based A2A agents and publish them to scalable Cloud Run services
+2. **Orchestration with a Host Agent** — a central ADK agent routes user requests to the appropriate deployed specialist agent over the A2A protocol
+3. **Vertex AI Evaluation** — run structured evaluation datasets against the live Cloud Run endpoints and visualise quality metrics with Plotly
+
+### Open in a hosted environment
+
+<CardGroup cols={3}>
+  <Card title="Google Colab" icon="google" href="https://colab.research.google.com/github/a2aproject/a2a-samples/blob/main/notebooks/multi_agents_eval_with_cloud_run_deployment.ipynb">
+    Open in Colab
+  </Card>
+  <Card title="Colab Enterprise" icon="building" href="https://console.cloud.google.com/vertex-ai/colab/import/https:%2F%2Fraw.githubusercontent.com%2Fa2aproject%2Fa2a-samples%2Fmain%2Fnotebooks%2Fmulti_agents_eval_with_cloud_run_deployment.ipynb">
+    Open in Colab Enterprise
+  </Card>
+  <Card title="Vertex AI Workbench" icon="server" href="https://console.cloud.google.com/vertex-ai/workbench/deploy-notebook?download_url=https://raw.githubusercontent.com/a2aproject/a2a-samples/main/notebooks/multi_agents_eval_with_cloud_run_deployment.ipynb">
+    Open in Workbench
+  </Card>
+</CardGroup>
+
+### Prerequisites
+
+- A Google Cloud project ID and project number
+- Cloud Run API enabled
+- `gcloud` CLI authenticated (`gcloud auth login`)
+- Docker or Podman for local image building
+
+### Dependencies installed by the notebook
+
+```python
+%pip install google-cloud-aiplatform httpx "a2a-sdk==0.3.0" --quiet
+%pip install --upgrade --quiet 'google-adk'
+%pip install "langchain-google-genai==2.1.5" --quiet
+%pip install "langchain-mcp-adapters==0.1.0" --quiet
+%pip install "langchain-google-vertexai==2.0.24" --quiet
+%pip install "langgraph==0.4.5" --quiet
+```
+
+### Sample: using A2AClient against a Cloud Run endpoint
+
+```python
+from a2a.client import A2ACardResolver, A2AClient
+from a2a.types import (
+    AgentCard,
+    MessageSendParams,
+    Part,
+    SendMessageRequest,
+    SendMessageResponse,
+    SendMessageSuccessResponse,
+    Task,
+    TaskArtifactUpdateEvent,
+    TaskStatusUpdateEvent,
+)
+```
+
+<Note>
+  Set `PROJECT_ID`, `PROJECT_NUM`, and `LOCATION` at the top of the notebook before running any cells. The notebook will raise a `ValueError` if `PROJECT_ID` is empty.
+</Note>
+
+---
+
+## Task vs. Message
+
+**File:** `notebooks/task_vs_message.ipynb`
+
+This notebook is a focused conceptual explainer. It illustrates the difference between the two primary A2A exchange primitives — **messages** and **tasks** — using runnable code examples that demonstrate when each is appropriate and how the protocol handles them differently.
+
+### What you'll learn
+
+- When a `message/send` call returns a `Message` (stateless, single-turn) versus a `Task` (stateful, multi-turn)
+- How task state (`submitted` → `working` → `completed` / `input_required` / `failed`) is tracked
+- How `TaskStatusUpdateEvent` and `TaskArtifactUpdateEvent` carry progress and output
+- How a requesting agent decides whether to resume an existing task or start a new one
+
+### Open in a hosted environment
+
+<CardGroup cols={2}>
+  <Card title="Google Colab" icon="google" href="https://colab.research.google.com/github/a2aproject/a2a-samples/blob/main/notebooks/task_vs_message.ipynb">
+    Open in Colab
+  </Card>
+  <Card title="Vertex AI Workbench" icon="server" href="https://console.cloud.google.com/vertex-ai/workbench/deploy-notebook?download_url=https://raw.githubusercontent.com/a2aproject/a2a-samples/main/notebooks/task_vs_message.ipynb">
+    Open in Workbench
+  </Card>
+</CardGroup>
+
+### Dependencies installed by the notebook
+
+```python
+%pip install google-cloud-aiplatform httpx "a2a-sdk" --quiet
+%pip install --upgrade --quiet "google-adk"
+```
+
+### Sample: routing agent that produces tasks or messages
+
+The notebook defines a `RouterAgent` backed by Gemini 2.5 Flash with a structured output schema:
+
+```python
+from enum import Enum
+from pydantic import BaseModel
+from typing import Optional
+
+class RouterActionType(str, Enum):
+    NONE = "NONE"
+    BOOK_FLIGHT = "BOOK_FLIGHT"
+    BOOK_HOTEL = "BOOK_HOTEL"
+
+class RouterOutput(BaseModel):
+    message: str
+    next_step: RouterActionType
+    next_step_input: Optional[str] = None
+```
+
+A `BookingAgentExecutor` wraps this router and chooses whether to emit a plain message (for `NONE` intents) or create a task (for booking intents):
+
+```python
+class BookingAgentExecutor(AgentExecutor):
+    """Reimbursement AgentExecutor Example."""
+
+    def __init__(self) -> None:
+        self.router_agent = RouterAgent()
+
+    async def execute(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
+        query = context.get_user_input()
+        task = context.current_task
+        router_output = await self.router_agent.run(query, str(uuid.uuid4()))
+        ...
+```
+
+---
+
+## Running Notebooks Locally
+
+If you prefer to run any of the notebooks outside of a managed cloud environment, use `uv` to create an isolated Python environment with all dependencies.
+
+<Steps>
+  <Step title="Install uv">
+    If `uv` is not already installed, follow the [official uv installation guide](https://docs.astral.sh/uv/getting-started/installation/).
+  </Step>
+
+  <Step title="Clone the repository and navigate to notebooks">
+    ```bash
+    git clone https://github.com/a2aproject/a2a-samples.git
+    cd a2a-samples/notebooks
+    ```
+  </Step>
+
+  <Step title="Install Jupyter and the A2A SDK">
+    ```bash
+    uv pip install jupyter google-adk a2a-sdk google-cloud-aiplatform httpx
+    ```
+  </Step>
+
+  <Step title="Set your Google Cloud credentials">
+    <Tabs>
+      <Tab title="Vertex AI (recommended)">
+        ```bash
+        export GOOGLE_GENAI_USE_VERTEXAI=TRUE
+        export GOOGLE_CLOUD_PROJECT=your_project_id
+        export GOOGLE_CLOUD_LOCATION=us-central1
+        gcloud auth application-default login
+        ```
+      </Tab>
+      <Tab title="Google AI Studio API Key">
+        ```bash
+        export GOOGLE_API_KEY=your_api_key_here
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Launch Jupyter and open a notebook">
+    ```bash
+    uv run jupyter notebook
+    ```
+
+    Open any `.ipynb` file from the `notebooks/` directory in the Jupyter interface.
+  </Step>
+</Steps>
+
+<Tip>
+  Each notebook's first code cell contains a `%pip install` magic that will install any remaining dependencies directly into the running kernel, so you don't need to pre-install everything manually.
+</Tip>

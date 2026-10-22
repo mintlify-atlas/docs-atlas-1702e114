@@ -1,0 +1,310 @@
+---
+title: "Traceability Extension for A2A Response Observability"
+sidebarTitle: "Traceability"
+description: "Attach a ResponseTrace to A2A task results. Covers the proto schema, ToolInvocation and AgentInvocation step actions, metadata key, and activation."
+---
+
+The Traceability extension for Agent2Agent attaches a structured execution trace to every task response, giving callers full visibility into what happened inside the agent: which tools were called, which sub-agents were invoked, how long each step took, and how many tokens it consumed. This makes A2A-based multi-agent systems first-class citizens in observability pipelines without requiring a separate tracing sidecar.
+
+## Extension URI
+
+```text
+https://github.com/a2aproject/a2a-samples/extensions/traceability/v1
+```
+
+This URI is used in the `X-A2A-Extensions` activation header and as the prefix for the metadata key where trace data is stored.
+
+## Traceability Data Location
+
+Traceability information is delivered in one of two ways, depending on the agent implementation:
+
+1. **Message or Artifact metadata** — stored under the key:
+   ```
+   github.com/a2aproject/a2a-samples/extensions/traceability/v1/traceability
+   ```
+2. **Additional artifact** — appended as a separate artifact in the completed task response.
+
+Both delivery modes carry an identical `ResponseTrace` payload.
+
+## Proto Schema
+
+The full data model is defined in Protocol Buffers. The root object is `ResponseTrace`; it contains an ordered list of `Step` messages, each of which carries a `StepAction` union of either `ToolInvocation` or `AgentInvocation`.
+
+```proto
+// A Trace message that contains a collection of spans.
+message ResponseTrace {
+  // A unique identifier for the trace.
+  string trace_id = 1;
+
+  // The list of steps that make up this trace.
+  repeated Step steps = 2;
+}
+
+
+enum CallTypeEnum {
+  AGENT = 1;
+  TOOL  = 2;
+}
+
+
+message StepAction {
+  oneof action {
+    ToolInvocation  tool_invocation  = 1;
+    AgentInvocation agent_invocation = 2;
+  }
+}
+
+
+message ToolInvocation {
+  string                tool_name  = 1;
+  google.protobuf.Struct parameters = 2;
+}
+
+
+message AgentInvocation {
+  // The URL of the agent that was invoked.
+  string agent_url  = 1;
+  // The agent name.
+  string agent_name = 2;
+  // The request message sent to the agent.
+  google.protobuf.Struct requests = 3;
+  // Nested trace from the callee (if the callee also supports traceability).
+  ResponseTrace response_trace = 4;
+}
+
+
+// A Step message that represents a single operation within a trace.
+message Step {
+  // A unique identifier for this step.
+  string step_id = 1;
+
+  // The trace_id of the trace this step belongs to.
+  string trace_id = 2;
+
+  // The step_id of the parent step. Empty if this is a root step.
+  string parent_step_id = 3;
+
+  // The type of the operation this step represents.
+  CallTypeEnum call_type = 4;
+
+  // Detailed invocation about the step.
+  StepAction step_action = 5;
+
+  // The cost of the operation this step represents.
+  int64 cost = 6;
+
+  // The token count of the operation this step represents.
+  int64 total_tokens = 7;
+
+  // A set of key-value attributes with additional details about the step.
+  map<string, string> additional_attributes = 8;
+
+  // The latency of the operation this step represents (milliseconds).
+  int64 latency = 9;
+
+  // The start time of the operation.
+  google.protobuf.Timestamp start_time = 10;
+
+  // The end time of the operation.
+  google.protobuf.Timestamp end_time = 11;
+}
+```
+
+## Step Fields Reference
+
+<ResponseField name="step_id" type="string" required>
+  A UUID-based unique identifier for this step (e.g., `step-3f8a1b2c-...`). Used as `parent_step_id` by child steps to reconstruct the call tree.
+</ResponseField>
+
+<ResponseField name="trace_id" type="string" required>
+  The `trace_id` of the `ResponseTrace` this step belongs to. Every step in a trace shares the same value.
+</ResponseField>
+
+<ResponseField name="parent_step_id" type="string">
+  The `step_id` of the parent step. Empty for root-level steps. Populate this field to represent nested tool calls or chained agent invocations.
+</ResponseField>
+
+<ResponseField name="call_type" type="CallTypeEnum" required>
+  Either `AGENT` (a call to a downstream A2A agent) or `TOOL` (a call to a local or remote tool/function).
+</ResponseField>
+
+<ResponseField name="step_action" type="StepAction" required>
+  A union field. Set `tool_invocation` for `TOOL` steps and `agent_invocation` for `AGENT` steps. Only one field may be set at a time.
+</ResponseField>
+
+<ResponseField name="cost" type="int64">
+  The financial or resource cost of this step, expressed as a normalised integer. Units are defined by the agent.
+</ResponseField>
+
+<ResponseField name="total_tokens" type="int64">
+  Total token count consumed by this step, if the step involved an LLM inference call.
+</ResponseField>
+
+<ResponseField name="latency" type="int64">
+  Elapsed execution time in **milliseconds**, computed as `end_time − start_time`.
+</ResponseField>
+
+<ResponseField name="start_time" type="google.protobuf.Timestamp" required>
+  UTC timestamp recorded immediately before the operation began.
+</ResponseField>
+
+<ResponseField name="end_time" type="google.protobuf.Timestamp">
+  UTC timestamp recorded immediately after the operation completed (or failed).
+</ResponseField>
+
+<ResponseField name="additional_attributes" type="map<string, string>">
+  Open-ended key-value pairs for extension-specific metadata such as model names, region codes, or custom cost centres.
+</ResponseField>
+
+## ToolInvocation vs AgentInvocation
+
+<Tabs>
+  <Tab title="ToolInvocation">
+    Used when `call_type = TOOL`. Captures the name of the tool and the parameters passed to it.
+
+    ```json
+    {
+      "step_id": "step-a1b2c3d4",
+      "trace_id": "trace-xyz",
+      "call_type": "TOOL",
+      "step_action": {
+        "tool_invocation": {
+          "tool_name": "search_flights",
+          "parameters": {
+            "origin": "LHR",
+            "destination": "JFK",
+            "date": "2024-12-01"
+          }
+        }
+      },
+      "latency": 312,
+      "total_tokens": 0,
+      "start_time": "2024-11-15T09:23:47Z",
+      "end_time": "2024-11-15T09:23:47.312Z"
+    }
+    ```
+  </Tab>
+  <Tab title="AgentInvocation">
+    Used when `call_type = AGENT`. Captures the downstream agent's URL and name, the request sent, and optionally an entire nested `ResponseTrace` if the callee also supports traceability.
+
+    ```json
+    {
+      "step_id": "step-e5f6g7h8",
+      "trace_id": "trace-xyz",
+      "call_type": "AGENT",
+      "step_action": {
+        "agent_invocation": {
+          "agent_url": "https://pricing-agent.example.com",
+          "agent_name": "PricingAgent",
+          "requests": {
+            "flight_id": "BA0117",
+            "currency": "GBP"
+          },
+          "response_trace": {
+            "trace_id": "trace-nested-abc",
+            "steps": []
+          }
+        }
+      },
+      "latency": 784,
+      "total_tokens": 512,
+      "start_time": "2024-11-15T09:23:48Z",
+      "end_time": "2024-11-15T09:23:48.784Z"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Python SDK Integration
+
+The `TraceabilityExtension`, `ResponseTrace`, `TraceRecord`, and `TraceStep` classes are in `samples/python/extensions/traceability/`.
+
+### Declaring Support in AgentCard
+
+```python
+from traceability_ext import TraceabilityExtension
+
+ext = TraceabilityExtension()
+agent_extension = ext.agent_extension()
+# Add to card.capabilities.extensions
+```
+
+### Recording Steps with TraceStep Context Manager
+
+`TraceStep` is a context manager that automatically calls `end_step` (recording `end_time` and `latency`) when the `with` block exits, even if an exception is raised.
+
+```python
+from traceability_ext import (
+    CallTypeEnum,
+    ResponseTrace,
+    TraceStep,
+)
+
+trace = ResponseTrace()
+
+# Tool call step
+with TraceStep(
+    trace,
+    CallTypeEnum.TOOL,
+    name="search_flights",
+    parameters={"origin": "LHR", "destination": "JFK"},
+) as step:
+    results = search_flights(origin="LHR", destination="JFK")
+    step.end_step(total_tokens=0)
+
+# Agent call step
+with TraceStep(
+    trace,
+    CallTypeEnum.AGENT,
+    name="PricingAgent",
+    requests={"flight_id": "BA0117"},
+) as step:
+    price = pricing_agent.get_price("BA0117")
+    step.end_step(cost=5, total_tokens=512)
+
+# Serialise and attach to the response message metadata
+TRACEABILITY_KEY = "github.com/a2aproject/a2a-samples/extensions/traceability/v1/traceability"
+message.metadata[TRACEABILITY_KEY] = trace.as_dict()
+```
+
+### Trace Dictionary Output
+
+```python
+trace.as_dict()
+# {
+#   "trace_id": "trace-3f8a...",
+#   "steps": [
+#     {
+#       "step_id": "step-...",
+#       "trace_id": "trace-3f8a...",
+#       "call_type": "TOOL",
+#       "name": "search_flights",
+#       "latency": 312,
+#       "start_time": "2024-11-15T09:23:47.000000+00:00",
+#       "end_time": "2024-11-15T09:23:47.312000+00:00",
+#       ...
+#     }
+#   ]
+# }
+```
+
+## Activating the Extension
+
+Clients request traceability by including the extension URI in the `X-A2A-Extensions` HTTP header:
+
+```http
+POST /tasks/send HTTP/1.1
+Host: agent.example.com
+Content-Type: application/json
+X-A2A-Extensions: https://github.com/a2aproject/a2a-samples/extensions/traceability/v1
+```
+
+For gRPC, pass the same URI as the `X-A2A-Extensions` metadata value. Servers that have not declared traceability support in their AgentCard **MUST NOT** return trace data, even if the header is present.
+
+<Tip>
+  You can activate both Timestamp and Traceability in a single request by listing both URIs in the `X-A2A-Extensions` header, comma-separated. The server applies each extension independently.
+</Tip>
+
+<Warning>
+  Trace data may contain sensitive details about internal agent topology, tool names, and request parameters. Agents **SHOULD** sanitise or redact fields in `additional_attributes` and `parameters` before including them in traces returned to untrusted callers.
+</Warning>

@@ -1,47 +1,266 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "A2A Quickstart: Run Your First Agent in 5 Minutes"
+sidebarTitle: "Quickstart"
+description: "Stand up the A2A Python helloworld agent server, resolve its AgentCard, and exchange JSON-RPC messages with it from a test client — no LLM API key required."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+The Agent2Agent (A2A) quickstart walks you through launching the canonical helloworld agent server and communicating with it from a Python test client. The helloworld sample uses no external LLM — it echoes your input — making it the fastest possible path to observing the full A2A request/response lifecycle on your local machine.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+<Note>
+  This quickstart uses the Python SDK (`a2a-sdk==1.1.0`) and `uv` as the package manager. The server runs on `http://127.0.0.1:9999` by default.
+</Note>
 
 ## Prerequisites
 
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+- Python 3.10 or higher
+- [uv](https://docs.astral.sh/uv/) package manager
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+### Install uv
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+`uv` is a fast Python package and project manager that handles virtual environments and dependency resolution automatically.
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
+<CodeGroup>
+```bash macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+```powershell Windows
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+</CodeGroup>
+
+Verify the installation:
+
+```bash
+uv --version
+```
+
+### Navigate to the helloworld agent
+
+Clone the repository (or navigate to it if you already have it):
+
+```bash
+git clone https://github.com/a2aproject/a2a-samples.git
+cd a2a-samples/samples/python/agents/helloworld
+```
+
+The directory contains four files:
+
+| File | Purpose |
+|---|---|
+| `__main__.py` | Builds the `AgentCard`, wires routes, starts the Uvicorn server |
+| `agent_executor.py` | Implements `AgentExecutor` — processes requests and manages task state |
+| `test_client.py` | Async test client demonstrating card resolution, non-streaming, and streaming calls |
+| `requirements.txt` | Pins `a2a-sdk==1.1.0`, `uvicorn`, `pytest`, `sse-starlette` |
+
+### Start the helloworld agent server
+
+In your first terminal, from the `helloworld` directory:
+
+```bash
+uv run .
+```
+
+`uv` creates an isolated virtual environment, installs the pinned dependencies from `requirements.txt`, and runs `__main__.py`. You should see:
+
+```text
+INFO:     Started server process [...]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:9999 (Press CTRL+C to quit)
+```
+
+The server publishes the following AgentCard at `http://127.0.0.1:9999/.well-known/agent.json`:
+
+```json
+{
+  "name": "Hello World Agent",
+  "description": "Just a hello world agent",
+  "version": "0.0.1",
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "capabilities": {
+    "streaming": true,
+    "extendedAgentCard": true
+  },
+  "supportedInterfaces": [
+    {
+      "protocolBinding": "JSONRPC",
+      "url": "http://127.0.0.1:9999",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "skills": [
+    {
+      "id": "echo_bot",
+      "name": "Echo Bot",
+      "description": "An example agent that acknowledges client request and responds with a \"Hello World\" message.",
+      "inputModes": ["text/plain"],
+      "outputModes": ["text/plain"],
+      "tags": ["a2a", "echo-example"],
+      "examples": ["hi", "how are you"]
+    }
+  ]
+}
+```
+
+### Run the test client
+
+Open a **second terminal**, navigate to the same directory, and run:
+
+```bash
+cd a2a-samples/samples/python/agents/helloworld
+uv run test_client.py
+```
+
+The test client performs four operations in sequence:
+
+1. Resolves the public AgentCard from `/.well-known/agent.json`
+2. Sends a non-streaming `message/send` request
+3. Sends a streaming `message/stream` request
+4. Fetches the authenticated extended AgentCard
+
+The underlying JSON-RPC request for each `message/send` call looks like this:
+
+```json
+{
+  "id": "12113c25-b752-473f-977e-c9ad33cf4f56",
+  "jsonrpc": "2.0",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "kind": "message",
+      "messageId": "120ec73f93024993becf954d03a672bc",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "Hi there!"
+        }
+      ],
+      "role": "user"
+    }
+  }
+}
+```
+
+Here is the relevant excerpt from `test_client.py` that builds and sends this request:
+
+```python
+from a2a.client import ClientConfig, create_client
+from a2a.helpers import new_text_message
+from a2a.types import Role, SendMessageRequest
+
+config = ClientConfig(streaming=False)
+client = await create_client(agent=public_agent_card, client_config=config)
+
+message = new_text_message(text_query, role=Role.ROLE_USER)
+request = SendMessageRequest(message=message)
+
+async for chunk in client.send_message(request):
+    print(chunk)
+```
+
+And for streaming:
+
+```python
+client_config = ClientConfig(streaming=True)
+client = await create_client(agent=public_agent_card, client_config=client_config)
+
+async for chunk in client.send_message(request):
+    print(chunk)
+```
+
+### Review the expected output
+
+A successful run produces output similar to the following:
+
+```text
+Starting an interactive session with A2A Server [http://127.0.0.1:9999]
+
+Successfully fetched the public agent card:
+====================================================
+                    AgentCard
+====================================================
+--- General ---
+Name        : Hello World Agent
+Description : Just a hello world agent
+Version     : 0.0.1
+
+--- Interfaces ---
+  [0] http://127.0.0.1:9999  (JSONRPC)
+
+--- Capabilities ---
+Streaming           : True
+Push notifications  : False
+Extended agent card : True
+
+--- Non-Streaming Call ---
+history {
+  role: ROLE_USER
+  parts {
+    text: "Hi there!"
+  }
+}
+history {
+  role: ROLE_AGENT
+  parts {
+    text: "Processing request..."
+  }
+}
+artifacts {
+  parts {
+    text: "Hello, World! I have received your request (Hi there!)"
+    media_type: "text/plain"
+  }
+}
+task_state: TASK_STATE_COMPLETED
+message {
+  parts {
+    text: "Request is completed!"
+  }
+}
+```
+
+The task progresses through three states you can observe in the history:
+
+1. **submitted** — task is registered
+2. **working** — executor is processing; interim `Processing request...` message attached
+3. **completed** — final artifact `Hello, World! I have received your request (...)` is available
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## What Just Happened?
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+<Accordion title="Step-by-step internals">
+  1. `uv run .` invoked `__main__.py`, which constructed an `AgentCard`, registered it on a `Starlette` ASGI app at `/.well-known/agent.json`, and mounted JSON-RPC routes at `/`.
+  2. `test_client.py` used `A2ACardResolver` to `GET /.well-known/agent.json` and deserialise the card.
+  3. `create_client(agent=public_agent_card, ...)` read `supportedInterfaces[0].url` to determine the JSON-RPC endpoint.
+  4. `client.send_message(request)` serialised a `SendMessageRequest` to JSON-RPC and `POST`-ed it to `http://127.0.0.1:9999/`.
+  5. `DefaultRequestHandler` routed the call to `HelloWorldAgentExecutor.execute()`.
+  6. The executor created a task, pushed a `working` status update, called `HelloWorldAgent.invoke()`, attached the response as an artifact, and pushed a `completed` status update — all via `EventQueue`.
+  7. The server serialised the completed `Task` object and returned it as the JSON-RPC result.
+</Accordion>
+
+## Optional: Interactive CLI Host
+
+The repository also ships a CLI host that lets you chat interactively with any A2A-compliant agent. While the helloworld server is running:
+
+```bash
+cd a2a-samples/samples/python/hosts/cli
+uv run . --agent http://127.0.0.1:9999
+```
+
+Type any message and press Enter. Use `exit` to quit.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Core Concepts" icon="book-open" href="/core-concepts">
+    Understand every A2A primitive: AgentCards, Tasks, Messages, Artifacts, JSON-RPC methods, and SSE streaming.
+  </Card>
+  <Card title="Python Helloworld Walkthrough" icon="code" href="/samples/python/helloworld">
+    Annotated line-by-line explanation of the server and executor implementation.
+  </Card>
+</CardGroup>

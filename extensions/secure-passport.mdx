@@ -1,0 +1,213 @@
+---
+title: "Secure Passport Extension for A2A Agent Identity"
+sidebarTitle: "Secure Passport"
+description: "Secure Passport lets calling agents attach a signed CallerContext to A2A messages, turning anonymous calls into trusted, context-aware agent partnerships."
+---
+
+The Secure Passport extension transforms anonymous Agent2Agent calls into trust-verified, context-aware interactions. A calling agent attaches a structured **CallerContext** payload — containing its identity, session state, and an optional cryptographic signature — to any A2A message. The receiving agent extracts this context, verifies the signature, and uses the bundled state to fulfil the request without asking additional questions.
+
+## Extension URI
+
+```text
+https://github.com/a2aproject/a2a-samples/tree/main/samples/python/extensions/secure-passport
+```
+
+This URI is also used as the **metadata key** when embedding the `CallerContext` inside a message. Both uses of the URI must be identical.
+
+## CallerContext Payload
+
+The `CallerContext` object is the Secure Passport payload. It is placed in the `metadata` map of any A2A `Message` object.
+
+<ParamField body="clientId" type="string" required>
+  The verifiable unique identifier of the calling agent or client. Typically an `a2a://` URI that the callee can use for identity resolution, for example `a2a://orchestrator-agent.com`.
+</ParamField>
+
+<ParamField body="state" type="object" required>
+  A free-form JSON object containing the contextual data the callee needs. Keys should match the `supportedStateKeys` declared in the callee's AgentCard. Examples include `user_preferred_currency`, `loyalty_tier`, or `user_locale`.
+</ParamField>
+
+<ParamField body="signature" type="string">
+  A digital signature of the entire `state` object, signed by the calling agent's private key. The callee verifies this before using the state for high-privilege actions.
+</ParamField>
+
+<ParamField body="sessionId" type="string">
+  An optional session or conversation identifier that enables the callee to maintain thread continuity across multiple turns in the same task.
+</ParamField>
+
+### Example CallerContext
+
+```json
+{
+  "clientId": "a2a://orchestrator-agent.com",
+  "sessionId": "travel-session-xyz",
+  "signature": "MOCK-SIG-123456...",
+  "state": {
+    "user_preferred_currency": "GBP",
+    "loyalty_tier": "Gold"
+  }
+}
+```
+
+## Declaring Support in AgentCard
+
+A callee agent that can receive and use a Secure Passport **MUST** declare support in the `extensions` array of its `AgentCapabilities`. The optional `supportedStateKeys` parameter lets the callee explicitly advertise which state keys it understands, so callers can tailor the `state` object accordingly.
+
+```json
+{
+  "capabilities": {
+    "extensions": [
+      {
+        "uri": "https://github.com/a2aproject/a2a-samples/tree/main/samples/python/extensions/secure-passport",
+        "params": {
+          "supportedStateKeys": ["user_preferred_currency", "loyalty_tier"]
+        }
+      }
+    ]
+  }
+}
+```
+
+The Python SDK helper generates this declaration automatically:
+
+```python
+from secure_passport_ext import SecurePassportExtension
+
+declaration = SecurePassportExtension.get_agent_card_declaration(
+    supported_state_keys=["user_preferred_currency", "loyalty_tier"]
+)
+```
+
+## Attaching CallerContext to a Message
+
+The `CallerContext` is embedded in the `metadata` map of an A2A `Message` under the extension URI as the key. Use the `add_secure_passport` helper to handle the serialisation correctly.
+
+<Tabs>
+  <Tab title="Python SDK helper">
+    ```python
+    from secure_passport_ext import CallerContext, add_secure_passport
+
+    context = CallerContext(
+        clientId="a2a://orchestrator-agent.com",
+        sessionId="travel-session-xyz",
+        signature="MOCK-SIG-123456...",
+        state={
+            "user_preferred_currency": "GBP",
+            "loyalty_tier": "Gold",
+        },
+    )
+
+    # message is an a2a.types.Message instance
+    add_secure_passport(message, context)
+    ```
+  </Tab>
+  <Tab title="Raw JSON-RPC request">
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "id": "req-123",
+      "method": "tasks/send",
+      "params": {
+        "message": {
+          "messageId": "msg-456",
+          "role": "user",
+          "parts": [
+            { "kind": "text", "content": "Book a flight for me." }
+          ],
+          "metadata": {
+            "https://github.com/a2aproject/a2a-samples/tree/main/samples/python/extensions/secure-passport": {
+              "clientId": "a2a://orchestrator-agent.com",
+              "sessionId": "travel-session-xyz",
+              "signature": "MOCK-SIG-123456...",
+              "state": {
+                "user_preferred_currency": "GBP",
+                "loyalty_tier": "Gold"
+              }
+            }
+          }
+        }
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Extracting and Verifying on the Server Side
+
+On the receiving side, use `get_secure_passport` to extract and validate the `CallerContext`. The helper performs Pydantic schema validation and returns `None` if the payload is absent or malformed.
+
+```python
+from secure_passport_ext import CallerContext, get_secure_passport
+
+def handle_message(message):
+    passport: CallerContext | None = get_secure_passport(message)
+
+    if passport is None:
+        # No passport provided — treat as an anonymous call.
+        return handle_anonymous(message)
+
+    if passport.is_verified:
+        # signature field is present; verify cryptographically before
+        # using state for privileged operations.
+        verify_signature(passport.signature, passport.state)
+
+    # Use passport.state to personalise the response.
+    currency = passport.state.get("user_preferred_currency", "USD")
+    tier = passport.state.get("loyalty_tier", "Standard")
+    return handle_trusted(message, currency=currency, tier=tier)
+```
+
+The `is_verified` property is a convenience check that returns `True` when a `signature` field is present:
+
+```python
+@property
+def is_verified(self) -> bool:
+    """Conceptually checks if the passport contains a valid signature."""
+    return self.signature is not None
+```
+
+<Warning>
+  `is_verified` only confirms that a signature field exists. Your agent is responsible for performing the actual cryptographic verification of the signature against the `state` object before using its contents for high-privilege or irreversible operations.
+</Warning>
+
+## Middleware Integration
+
+For production integrations, the extension ships a conceptual middleware layer that handles attachment and extraction transparently, so individual agent handlers do not need to call the helper functions manually.
+
+<AccordionGroup>
+  <Accordion title="Client middleware (attaching)">
+    ```python
+    from secure_passport_ext import SecurePassportExtension, CallerContext
+
+    context = CallerContext(
+        clientId="a2a://orchestrator-agent.com",
+        state={"user_preferred_currency": "GBP"},
+    )
+
+    # Wraps the next_handler; attaches the passport before transport.
+    SecurePassportExtension.client_middleware(next_handler, message, context)
+    ```
+  </Accordion>
+  <Accordion title="Server middleware (extracting)">
+    ```python
+    from secure_passport_ext import SecurePassportExtension
+
+    # Wraps the next_handler; extracts and validates the passport on arrival.
+    # The passport (or None) is injected as the second argument to next_handler.
+    SecurePassportExtension.server_middleware(next_handler, message)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Security Guidelines
+
+<Warning>
+  Agents **MUST NOT** include sensitive or mutable data such as passwords, access tokens, or PII in the `state` object unless robust end-to-end cryptographic verification is implemented and required by the callee.
+</Warning>
+
+- Callees **SHOULD** verify the `signature` before relying on `state` content for high-privilege actions.
+- Callers **SHOULD** limit `state` keys to those listed in the callee's `supportedStateKeys` to avoid leaking unnecessary context.
+- The extension is classified as a **Profile Extension / Data-Only Extension** — it attaches data to existing messages and does not add new RPC methods.
+
+## Version
+
+Secure Passport specification version **1.0.0**.

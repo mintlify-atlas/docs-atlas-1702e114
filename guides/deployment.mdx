@@ -1,0 +1,339 @@
+---
+title: "Deploying A2A Agents to Production Environments"
+sidebarTitle: "Deployment"
+description: "Package A2A agents as containers, run them with Docker or Podman, deploy to Google Cloud Run, configure environment variables, and expose the correct hostname via HOST_OVERRIDE."
+---
+
+A2A agents are standard HTTP servers and can be deployed anywhere a container runtime or cloud platform is available. This page covers containerising an agent with the provided `Containerfile` and `Dockerfile`, running locally with Podman or Docker, deploying to Google Cloud Run, managing environment variables and secrets, and configuring the `HOST_OVERRIDE` environment variable so the `AgentCard` advertises the correct externally reachable URL.
+
+---
+
+## Container Build
+
+### Containerfile (LangGraph Agent — UBI8 / Python 3.12)
+
+The LangGraph currency agent ships a production-ready `Containerfile` based on the Red Hat UBI8 Python 3.12 image. It uses `uv` for fast, reproducible dependency installation:
+
+```dockerfile dockerfile
+# samples/python/agents/langgraph/Containerfile
+
+FROM registry.access.redhat.com/ubi8/python-312
+
+# Set work directory
+WORKDIR /opt/app-root
+
+# Copy Python Project Files (Container context must be the `python` directory)
+COPY . /opt/app-root
+
+USER root
+
+# Install system build dependencies and UV package manager
+RUN dnf -y update && dnf install -y gcc gcc-c++ \
+ && pip install uv
+
+# UV_COMPILE_BYTECODE=1: Compiles Python files to .pyc for faster startup
+# UV_LINK_MODE=copy: Ensures files are copied, not symlinked
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+# Install dependencies using uv sync.
+# --frozen: Ensures uv respects the uv.lock file
+# --no-install-project: Prevents installing the project itself in this stage
+# --no-dev: Excludes development dependencies
+RUN --mount=type=cache,target=/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev
+
+# Install the project
+RUN --mount=type=cache,target=/.cache/uv \
+    uv sync --frozen --no-dev
+
+# Allow non-root user to access everything in app-root
+RUN chgrp -R root /opt/app-root/ && chmod -R g+rwx /opt/app-root/
+
+EXPOSE 10000
+
+USER 1001
+
+CMD uv run app --host 0.0.0.0
+```
+
+### Dockerfile (ADK Cloud Run Agent — Python 3.13 slim)
+
+The ADK Cloud Run sample uses a slimmer `python:3.13-slim` base and copies `uv` directly from its official image:
+
+```dockerfile dockerfile
+# samples/python/agents/adk_cloud_run/Dockerfile
+
+FROM python:3.13-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+EXPOSE 8080
+WORKDIR /app
+
+COPY . ./
+
+RUN uv sync
+
+ENTRYPOINT ["uv", "run", ".", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+<Tip>
+  The `--mount=type=cache` directive in the UBI8 `Containerfile` caches the `uv` package cache between builds, dramatically reducing rebuild time when only application code changes.
+</Tip>
+
+---
+
+## Building and Running Locally
+
+<Steps>
+  <Step title="Navigate to the agent directory">
+    ```bash bash
+    cd samples/python/agents/langgraph
+    ```
+  </Step>
+  <Step title="Build the container image">
+    <CodeGroup>
+      ```bash Podman
+      podman build . -t langgraph-a2a-server
+      ```
+
+      ```bash Docker
+      docker build . -t langgraph-a2a-server
+      ```
+    </CodeGroup>
+  </Step>
+  <Step title="Run the container">
+    <CodeGroup>
+      ```bash Podman
+      podman run -p 10000:10000 \
+        -e GOOGLE_API_KEY=your_api_key_here \
+        langgraph-a2a-server
+      ```
+
+      ```bash Docker
+      docker run -p 10000:10000 \
+        -e GOOGLE_API_KEY=your_api_key_here \
+        langgraph-a2a-server
+      ```
+    </CodeGroup>
+  </Step>
+  <Step title="Connect with the CLI host">
+    ```bash bash
+    cd samples/python/hosts/cli
+    uv run . --agent http://0.0.0.0:10000
+    ```
+
+    <Warning>
+      When connecting to a containerised agent, use `0.0.0.0` — not `localhost`. The agent binds to all interfaces inside the container and `localhost` may resolve differently depending on your network configuration.
+    </Warning>
+  </Step>
+</Steps>
+
+---
+
+## Environment Variable Configuration
+
+All sensitive credentials and runtime configuration are passed as environment variables — never baked into the image.
+
+| Variable | Description | Example |
+|---|---|---|
+| `GOOGLE_API_KEY` | Gemini / Google GenAI API key | `AIzaSy...` |
+| `GOOGLE_GENAI_USE_VERTEXAI` | Use Vertex AI instead of the public Gemini API | `true` |
+| `GOOGLE_CLOUD_PROJECT` | GCP project ID for Vertex AI | `my-project-id` |
+| `GOOGLE_CLOUD_LOCATION` | GCP region for Vertex AI | `us-central1` |
+| `APP_URL` | The externally reachable URL of the deployed service — written into the `AgentCard` | `https://sample-a2a-agent-xyz.run.app` |
+| `HOST_OVERRIDE` | Alternative to `APP_URL` — overrides the hostname portion of the AgentCard URL when deploying behind a proxy or reverse load balancer | `agent.example.com` |
+| `USE_ALLOY_DB` | Enable AlloyDB-backed task store instead of in-memory | `True` |
+| `DB_INSTANCE` | AlloyDB instance URI | `projects/…/instances/primary` |
+| `DB_NAME` | Database name | `postgres` |
+
+<Note>
+  The `APP_URL` / `HOST_OVERRIDE` variables are critical. Without them, the `AgentCard` will advertise the internal container address (`0.0.0.0` or `localhost`), which is unreachable from other agents or clients outside the container network.
+</Note>
+
+### HOST_OVERRIDE for External Hostname
+
+When running behind a load balancer, reverse proxy, or on Cloud Run, the agent's internal listen address differs from its public URL. The `HOST_OVERRIDE` environment variable tells the server what hostname to publish in its `AgentCard.url`:
+
+```python python
+# samples/python/agents/adk_cloud_run/__main__.py
+agent_card = AgentCard(
+    name=calendar_agent.name,
+    description=calendar_agent.description,
+    version='1.0.0',
+    url=os.environ['APP_URL'],   # Set this to the public Cloud Run URL
+    default_input_modes=['text', 'text/plain'],
+    default_output_modes=['text', 'text/plain'],
+    capabilities=AgentCapabilities(streaming=True),
+    skills=[...],
+)
+```
+
+For the LangGraph agent run from a container, pass `HOST_OVERRIDE` directly:
+
+```bash bash
+podman run -p 10000:10000 \
+  -e GOOGLE_API_KEY=your_api_key_here \
+  -e HOST_OVERRIDE=agent.example.com \
+  langgraph-a2a-server
+```
+
+---
+
+## Deploying to Google Cloud Run
+
+Google Cloud Run is a fully managed serverless platform well-suited for stateless A2A agents. The ADK Cloud Run sample ships a complete deployment guide.
+
+### Prerequisites
+
+- Google Cloud SDK (`gcloud`) installed and authenticated
+- A GCP project with Cloud Run, Secret Manager, and optionally Vertex AI APIs enabled
+
+### Step 1 — Create a Dedicated Service Account
+
+```bash bash
+gcloud iam service-accounts create a2a-service-account \
+  --description="service account for a2a cloud run service" \
+  --display-name="A2A cloud run service account"
+```
+
+### Step 2 — Grant IAM Roles
+
+```bash bash
+gcloud projects add-iam-policy-binding "{your-project-id}" \
+  --member="serviceAccount:a2a-service-account@{your-project-id}.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor" \
+  --role="roles/aiplatform.user"
+```
+
+### Step 3 — Deploy the Service
+
+<Tabs>
+  <Tab title="With InMemoryTaskStore">
+    ```bash bash
+    gcloud run deploy sample-a2a-agent \
+        --port=8080 \
+        --source=. \
+        --no-allow-unauthenticated \
+        --memory "1Gi" \
+        --region="us-central1" \
+        --project="{your-project-id}" \
+        --service-account a2a-service-account \
+        --set-env-vars=GOOGLE_GENAI_USE_VERTEXAI=true,\
+    GOOGLE_CLOUD_PROJECT="{your-project-id}",\
+    GOOGLE_CLOUD_LOCATION="us-central1",\
+    APP_URL="TEMPORARY_URL"
+    ```
+  </Tab>
+  <Tab title="With AlloyDB Task Store">
+    ```bash bash
+    gcloud run deploy sample-a2a-agent \
+        --port=8080 \
+        --source=. \
+        --no-allow-unauthenticated \
+        --memory "1Gi" \
+        --region="us-central1" \
+        --project="{your-project-id}" \
+        --update-secrets=DB_USER=alloy_db_user:latest,DB_PASS=alloy_db_pass:latest \
+        --service-account a2a-service-account \
+        --set-env-vars=GOOGLE_GENAI_USE_VERTEXAI=true,\
+    GOOGLE_CLOUD_PROJECT="{your-project-id}",\
+    GOOGLE_CLOUD_LOCATION="us-central1",\
+    USE_ALLOY_DB="True",\
+    DB_INSTANCE="projects/{your-project-id}/locations/us-central1/clusters/{my-cluster}/instances/primary-instance",\
+    DB_NAME="postgres",\
+    APP_URL="TEMPORARY_URL"
+    ```
+  </Tab>
+</Tabs>
+
+### Step 4 — Update APP_URL with the Real Service URL
+
+After the initial deploy, Cloud Run outputs the service URL. Update the running service so its `AgentCard` advertises the correct public address:
+
+```bash bash
+gcloud run services update sample-a2a-agent \
+  --project="{your-project-id}" \
+  --region="us-central1" \
+  --update-env-vars=APP_URL="{your-cloud-run-service-url}"
+```
+
+### Step 5 — Test the Live Agent
+
+```bash bash
+cd samples/python/hosts/cli
+uv run . \
+  --agent {your-cloud-run-service-url} \
+  --bearer-token "$(gcloud auth print-identity-token)"
+```
+
+---
+
+## Cloud Run Authentication Models
+
+<CardGroup cols={2}>
+  <Card title="IAM Service-to-Service Auth" icon="shield-check">
+    Keep the service private (`--no-allow-unauthenticated`) and grant calling services `roles/run.invoker`. Clients within GCP obtain identity tokens automatically via the metadata server. Suitable for internal agents that only talk to other GCP services.
+  </Card>
+  <Card title="Public Access with Agent-Level Auth" icon="globe">
+    Deploy with `--allow-unauthenticated` and implement authentication inside the A2A server itself using `AgentCard.securitySchemes` and middleware — as shown in the headless-agent-auth and Java Magic 8-Ball security samples.
+  </Card>
+</CardGroup>
+
+---
+
+## Storing Secrets Securely
+
+Cloud Run can inject Secret Manager secrets as environment variables or volume mounts. Create secrets before deploying:
+
+```bash bash
+gcloud secrets create alloy_db_user --replication-policy="automatic"
+# Create a file user.txt containing the secret value
+gcloud secrets versions add alloy_db_user --data-file="user.txt"
+
+gcloud secrets create alloy_db_pass --replication-policy="automatic"
+gcloud secrets versions add alloy_db_pass --data-file="pass.txt"
+```
+
+Reference them in the deploy command with `--update-secrets`:
+
+```bash bash
+--update-secrets=DB_USER=alloy_db_user:latest,DB_PASS=alloy_db_pass:latest
+```
+
+---
+
+## Health Check Considerations
+
+Cloud Run automatically checks that the container responds on the declared `--port`. A2A agents serve the `AgentCard` at `GET /.well-known/agent.json` — this lightweight unauthenticated endpoint doubles as an effective health probe since it exercises the server's HTTP stack without requiring credentials.
+
+<Tip>
+  If you need a dedicated health route, add a `/health` endpoint to your Starlette application that returns `200 OK` with a simple JSON body. This avoids ambiguity between a healthy agent that correctly returns `401` on protected routes and one that is genuinely unhealthy.
+</Tip>
+
+---
+
+## Task Store Selection
+
+| Store | Best For | Notes |
+|---|---|---|
+| `InMemoryTaskStore` | Development, single-replica, short-lived tasks | Fast, no dependencies. State is lost on restart or scale-in. |
+| `DatabaseTaskStore` (AlloyDB) | Production, multi-replica, long-running tasks | Requires AlloyDB / PostgreSQL. Survives restarts and scales horizontally. |
+
+```python python
+# samples/python/agents/adk_cloud_run/__main__.py
+use_alloy_db_str = os.getenv('USE_ALLOY_DB', 'False')
+if use_alloy_db_str.lower() == 'true':
+    engine, connector = await create_sqlalchemy_engine(
+        DB_INSTANCE, DB_USER, DB_PASS, DB_NAME
+    )
+    task_store = DatabaseTaskStore(engine)
+else:
+    task_store = InMemoryTaskStore()
+
+request_handler = DefaultRequestHandler(
+    agent_executor=ADKAgentExecutor(agent=calendar_agent),
+    task_store=task_store,
+)
+```

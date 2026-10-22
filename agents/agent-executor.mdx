@@ -1,0 +1,262 @@
+---
+title: "AgentExecutor: Handling Requests and Emitting Events"
+sidebarTitle: "Agent Executor"
+description: "Implement the AgentExecutor interface to process incoming A2A tasks, emit status updates and artifacts, and wire everything into the DefaultRequestHandler."
+---
+
+The `AgentExecutor` is the core abstraction in Agent2Agent's Python SDK that bridges incoming JSON-RPC requests and your agent logic. When a client calls `message/send` or `message/stream`, the SDK deserializes the payload, resolves the task context, and hands control to your `AgentExecutor` implementation. This page explains every component involved — `AgentExecutor`, `RequestContext`, `EventQueue`, `TaskUpdater`, and the helper functions — and walks through the complete helloworld example.
+
+## AgentExecutor interface
+
+`AgentExecutor` is an abstract base class. You must subclass it and implement two methods.
+
+<ParamField path="execute" type="async method" required>
+  Called for every incoming `message/send` or `message/stream` request. Receives a `RequestContext` containing the inbound message and any existing task, and an `EventQueue` to publish state changes and artifacts into.
+
+  ```python
+  async def execute(
+      self,
+      context: RequestContext,
+      event_queue: EventQueue,
+  ) -> None:
+      ...
+  ```
+</ParamField>
+
+<ParamField path="cancel" type="async method" required>
+  Called when a client issues a `tasks/cancel` request. Raise `NotImplementedError` (or a `ServerError` wrapping `UnsupportedOperationError`) if your agent does not support cancellation.
+
+  ```python
+  async def cancel(
+      self,
+      context: RequestContext,
+      event_queue: EventQueue,
+  ) -> None:
+      raise NotImplementedError('Cancel is not supported.')
+  ```
+</ParamField>
+
+## RequestContext
+
+`RequestContext` is passed to `execute` and `cancel`. It carries everything the executor needs to understand the current request.
+
+<ParamField path="message" type="Message" required>
+  The inbound `Message` object containing the user's `parts` (text, files, data) and metadata such as `role`, `messageId`, `contextId`, and `taskId`.
+</ParamField>
+
+<ParamField path="current_task" type="Task | None">
+  If the incoming message references an existing task (via `taskId`), this field holds that task object. `None` for brand-new conversations.
+</ParamField>
+
+## EventQueue
+
+`EventQueue` is the output channel of your executor. Every event you enqueue is serialised by the SDK and delivered to the client — either as a JSON-RPC response body (for `message/send`) or as an SSE frame (for `message/stream`).
+
+<ParamField path="enqueue_event" type="async method">
+  Push any A2A event — `Task`, `TaskStatusUpdateEvent`, or `TaskArtifactUpdateEvent` — into the queue. The SDK processes the queue and streams or batches events to the client.
+
+  ```python
+  await event_queue.enqueue_event(task)
+  ```
+</ParamField>
+
+## TaskUpdater
+
+`TaskUpdater` is a convenience wrapper around `EventQueue` that constructs and enqueues well-formed events for the common lifecycle operations, saving you from building raw event objects manually.
+
+```python
+from a2a.server.tasks import TaskUpdater
+
+task_updater = TaskUpdater(
+    event_queue=event_queue,
+    task_id=task.id,
+    context_id=task.context_id,
+)
+```
+
+<ParamField path="update_status" type="async method">
+  Emit a `TaskStatusUpdateEvent` to move the task to a new state and optionally attach a status message.
+
+  ```python
+  await task_updater.update_status(
+      state=TaskState.TASK_STATE_WORKING,
+      message=new_text_message('Processing request...'),
+  )
+  ```
+</ParamField>
+
+<ParamField path="add_artifact" type="async method">
+  Emit a `TaskArtifactUpdateEvent` containing one or more `Part` objects (text, file, data). Each artifact is delivered to the client alongside or after the task result.
+
+  ```python
+  await task_updater.add_artifact(
+      parts=[new_text_part(text=result, media_type='text/plain')]
+  )
+  ```
+</ParamField>
+
+<ParamField path="complete" type="async method">
+  Shorthand to emit a final `TaskStatusUpdateEvent` with state `completed`. Equivalent to calling `update_status` with `TaskState.completed` and `final=True`.
+</ParamField>
+
+## Helper functions
+
+The SDK ships a set of helpers that build correctly-typed A2A objects from plain Python values.
+
+<ParamField path="new_task_from_user_message" type="function">
+  Creates a new `Task` object from an inbound `Message`, generating IDs and setting initial state. Use this when `context.current_task` is `None`.
+
+  ```python
+  from a2a.helpers import new_task_from_user_message
+  task = new_task_from_user_message(context.message)
+  ```
+</ParamField>
+
+<ParamField path="new_text_message" type="function">
+  Builds a `Message` with a single `TextPart`. Used for status messages attached to state transitions.
+
+  ```python
+  from a2a.helpers import new_text_message
+  msg = new_text_message('Processing request...')
+  ```
+</ParamField>
+
+<ParamField path="new_text_part" type="function">
+  Creates a single `TextPart` with the specified text and MIME type. Pass a list of parts to `add_artifact`.
+
+  ```python
+  from a2a.helpers import new_text_part
+  part = new_text_part(text='Hello, World!', media_type='text/plain')
+  ```
+</ParamField>
+
+<ParamField path="get_message_text" type="function">
+  Extracts the concatenated text content from all `TextPart` objects in a `Message`. Returns `None` if no text parts are present.
+
+  ```python
+  from a2a.helpers import get_message_text
+  query = get_message_text(context.message)
+  ```
+</ParamField>
+
+## DefaultRequestHandler and InMemoryTaskStore
+
+`DefaultRequestHandler` is the SDK's built-in JSON-RPC dispatcher. It holds a reference to your executor and a `TaskStore`, then routes each method call appropriately.
+
+`InMemoryTaskStore` is the default task persistence backend — a simple in-process dictionary. Replace it with a database-backed implementation in production to survive restarts and support horizontal scaling.
+
+```python
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore
+
+request_handler = DefaultRequestHandler(
+    agent_executor=HelloWorldAgentExecutor(),
+    task_store=InMemoryTaskStore(),
+    agent_card=public_agent_card,
+    extended_agent_card=extended_agent_card,
+)
+```
+
+## Full helloworld executor example
+
+The complete `agent_executor.py` from `samples/python/agents/helloworld/` is annotated below to show each step in the request lifecycle.
+
+```python
+from a2a.helpers import (
+    get_message_text,
+    new_task_from_user_message,
+    new_text_message,
+    new_text_part,
+)
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue
+from a2a.server.tasks import TaskUpdater
+from a2a.types import TaskState
+
+
+class HelloWorldAgent:
+    """The core agent logic — completely decoupled from A2A concerns."""
+
+    async def invoke(self, user_request: str) -> str:
+        return f'Hello, World! I have received your request ({user_request})'
+
+
+class HelloWorldAgentExecutor(AgentExecutor):
+    """Bridges A2A protocol events and HelloWorldAgent business logic."""
+
+    def __init__(self) -> None:
+        self.agent = HelloWorldAgent()
+
+    async def execute(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
+        # Step 1 — Resolve or create the task.
+        # For a brand-new conversation, current_task is None; create one and
+        # push it into the queue so the client knows the task ID immediately.
+        if context.current_task:
+            task = context.current_task
+        else:
+            task = new_task_from_user_message(context.message)
+            await event_queue.enqueue_event(task)
+
+        # Step 2 — Signal that work has started.
+        task_updater = TaskUpdater(
+            event_queue=event_queue,
+            task_id=task.id,
+            context_id=task.context_id,
+        )
+        await task_updater.update_status(
+            state=TaskState.TASK_STATE_WORKING,
+            message=new_text_message('Processing request...'),
+        )
+
+        # Step 3 — Run the underlying agent.
+        query = get_message_text(context.message)
+        if query:
+            result = await self.agent.invoke(user_request=query)
+        else:
+            result = 'No text input is provided!'
+
+        # Step 4 — Publish the result as an artifact.
+        await task_updater.add_artifact(
+            parts=[new_text_part(text=result, media_type='text/plain')]
+        )
+
+        # Step 5 — Mark the task as complete.
+        await task_updater.update_status(
+            state=TaskState.TASK_STATE_COMPLETED,
+            message=new_text_message('Request is completed!'),
+        )
+
+    async def cancel(
+        self, context: RequestContext, event_queue: EventQueue
+    ) -> None:
+        raise NotImplementedError('Cancel is not supported.')
+```
+
+## Putting it all together
+
+Wire your executor into a Starlette application using the SDK's route factories:
+
+```python
+import uvicorn
+from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
+from starlette.applications import Starlette
+
+routes = []
+routes.extend(create_agent_card_routes(public_agent_card))
+routes.extend(create_jsonrpc_routes(request_handler, '/'))
+
+app = Starlette(routes=routes)
+uvicorn.run(app, host='127.0.0.1', port=9999)
+```
+
+<Tip>
+  Keep your core agent logic (the `HelloWorldAgent` class) entirely free of A2A imports. This makes unit-testing your business logic straightforward and swapping the transport layer trivial.
+</Tip>
+
+<Note>
+  `InMemoryTaskStore` stores tasks in the process heap. If your agent server restarts, all in-flight task state is lost. For production deployments, implement the `TaskStore` interface against a durable backend such as Redis or PostgreSQL.
+</Note>

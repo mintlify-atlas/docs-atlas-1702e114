@@ -1,0 +1,273 @@
+---
+title: "Streaming Responses with Server-Sent Events in A2A"
+sidebarTitle: "Streaming"
+description: "Enable real-time streaming in Agent2Agent using the message/stream method, SSE event types, status-update and artifact-update events, and the final:true completion flag."
+---
+
+Agent2Agent supports **real-time streaming** through the `message/stream` JSON-RPC method. Instead of waiting for the agent to fully complete before returning a response, the server opens a persistent HTTP connection and emits Server-Sent Events (SSE) as work progresses — status transitions, intermediate messages, and final artifacts all arrive incrementally. This page covers how to declare streaming capability in your `AgentCard`, the two SSE event types (`status-update` and `artifact-update`), the `final: true` completion flag, and a complete Python streaming executor implementation.
+
+## Declaring streaming capability
+
+Before a client can use `message/stream`, your `AgentCard` must advertise streaming support. Set `streaming=True` in `AgentCapabilities` and register JSON-RPC routes with `create_jsonrpc_routes`:
+
+```python
+from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
+
+public_agent_card = AgentCard(
+    name='Hello World Agent',
+    description='Just a hello world agent',
+    version='0.0.1',
+    default_input_modes=['text/plain'],
+    default_output_modes=['text/plain'],
+    # Declare streaming and extended card support
+    capabilities=AgentCapabilities(streaming=True, extended_agent_card=True),
+    supported_interfaces=[
+        AgentInterface(
+            protocol_binding='JSONRPC',
+            url='http://127.0.0.1:9999',
+            protocol_version='1.0',
+        )
+    ],
+    skills=[skill],
+)
+
+routes = []
+routes.extend(create_agent_card_routes(public_agent_card))
+# create_jsonrpc_routes wires up both message/send and message/stream
+routes.extend(create_jsonrpc_routes(request_handler, '/'))
+```
+
+<Note>
+  `create_jsonrpc_routes` registers **both** `message/send` and `message/stream` on the same base path. The streaming route is automatically activated — no separate endpoint is required.
+</Note>
+
+## The message/stream method
+
+Clients invoke streaming by sending a standard JSON-RPC 2.0 request with the method set to `message/stream`. The request body is identical to `message/send`.
+
+```json
+{
+    "id": "6d12d159-ec67-46e6-8d43-18480ce7f6ca",
+    "jsonrpc": "2.0",
+    "method": "message/stream",
+    "params": {
+        "message": {
+            "kind": "message",
+            "messageId": "2f9538ef0984471aa0d5179ce3c67a28",
+            "parts": [
+                {
+                    "kind": "text",
+                    "text": "how much is 10 USD in INR?"
+                }
+            ],
+            "role": "user"
+        }
+    }
+}
+```
+
+The server responds with `Content-Type: text/event-stream` and begins emitting newline-delimited SSE frames.
+
+## SSE event types
+
+Every SSE frame has the structure `data: <JSON>\n\n`. The JSON payload is a complete JSON-RPC 2.0 response object whose `result` field contains one of three event kinds.
+
+### Initial task event
+
+The first frame delivers the newly created `Task` object in state `submitted`. This lets the client capture the `taskId` and `contextId` immediately without waiting for the agent to finish.
+
+```text
+data: {"id":"6d12d159-ec67-46e6-8d43-18480ce7f6ca","jsonrpc":"2.0","result":{"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","history":[{"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","kind":"message","messageId":"2f9538ef0984471aa0d5179ce3c67a28","parts":[{"kind":"text","text":"how much is 10 USD in INR?"}],"role":"user","taskId":"423a2569-f272-4d75-a4d1-cdc6682188e5"}],"id":"423a2569-f272-4d75-a4d1-cdc6682188e5","kind":"task","status":{"state":"submitted"}}}
+```
+
+### status-update events
+
+`kind: "status-update"` frames report task state transitions and carry optional agent messages. The `final` field is `false` for intermediate updates and `true` on the terminal transition.
+
+```text
+data: {"id":"6d12d159-ec67-46e6-8d43-18480ce7f6ca","jsonrpc":"2.0","result":{"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","final":false,"kind":"status-update","status":{"message":{"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","kind":"message","messageId":"1854a825-c64f-4f30-96f2-c8aa558b83f9","parts":[{"kind":"text","text":"Looking up the exchange rates..."}],"role":"agent","taskId":"423a2569-f272-4d75-a4d1-cdc6682188e5"},"state":"working"},"taskId":"423a2569-f272-4d75-a4d1-cdc6682188e5"}}
+
+data: {"id":"6d12d159-ec67-46e6-8d43-18480ce7f6ca","jsonrpc":"2.0","result":{"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","final":false,"kind":"status-update","status":{"message":{"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","kind":"message","messageId":"e72127a6-4830-4320-bf23-235ac79b9a13","parts":[{"kind":"text","text":"Processing the exchange rates.."}],"role":"agent","taskId":"423a2569-f272-4d75-a4d1-cdc6682188e5"},"state":"working"},"taskId":"423a2569-f272-4d75-a4d1-cdc6682188e5"}}
+```
+
+<ParamField path="kind" type="string">
+  Always `"status-update"` for this event type.
+</ParamField>
+
+<ParamField path="status.state" type="string">
+  The new task state (`"submitted"`, `"working"`, `"input-required"`, `"completed"`, `"failed"`, `"canceled"`).
+</ParamField>
+
+<ParamField path="status.message" type="Message">
+  Optional agent message accompanying this state transition. Typically used for intermediate progress messages while `state` is `"working"`.
+</ParamField>
+
+<ParamField path="final" type="boolean">
+  `false` for intermediate updates; `true` when this event represents the terminal state of the task. The client should close its SSE connection after receiving `final: true`.
+</ParamField>
+
+### artifact-update events
+
+`kind: "artifact-update"` frames carry the agent's output. They are emitted after the agent produces a result, before the final `status-update` that signals completion.
+
+```text
+data: {"id":"6d12d159-ec67-46e6-8d43-18480ce7f6ca","jsonrpc":"2.0","result":{"artifact":{"artifactId":"08373241-a745-4abe-a78b-9ca60882bcc6","name":"conversion_result","parts":[{"kind":"text","text":"10 USD is 856.2 INR."}]},"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","kind":"artifact-update","taskId":"423a2569-f272-4d75-a4d1-cdc6682188e5"}}
+```
+
+<ParamField path="kind" type="string">
+  Always `"artifact-update"` for this event type.
+</ParamField>
+
+<ParamField path="artifact.artifactId" type="string">
+  Unique identifier for this artifact.
+</ParamField>
+
+<ParamField path="artifact.name" type="string">
+  Human-readable label for the artifact (e.g., `"conversion_result"`).
+</ParamField>
+
+<ParamField path="artifact.parts" type="list[Part]">
+  The content parts of the artifact. Each part has a `kind` (`"text"`, `"file"`, `"data"`) and type-specific fields.
+</ParamField>
+
+## Complete SSE response sequence
+
+The full five-frame exchange for a `message/stream` call to the LangGraph currency agent, with the `final: true` completion frame highlighted:
+
+```text
+data: {"id":"6d12d159-ec67-46e6-8d43-18480ce7f6ca","jsonrpc":"2.0","result":{"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","history":[{"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","kind":"message","messageId":"2f9538ef0984471aa0d5179ce3c67a28","parts":[{"kind":"text","text":"how much is 10 USD in INR?"}],"role":"user","taskId":"423a2569-f272-4d75-a4d1-cdc6682188e5"}],"id":"423a2569-f272-4d75-a4d1-cdc6682188e5","kind":"task","status":{"state":"submitted"}}}
+
+data: {"id":"6d12d159-ec67-46e6-8d43-18480ce7f6ca","jsonrpc":"2.0","result":{"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","final":false,"kind":"status-update","status":{"message":{"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","kind":"message","messageId":"1854a825-c64f-4f30-96f2-c8aa558b83f9","parts":[{"kind":"text","text":"Looking up the exchange rates..."}],"role":"agent","taskId":"423a2569-f272-4d75-a4d1-cdc6682188e5"},"state":"working"},"taskId":"423a2569-f272-4d75-a4d1-cdc6682188e5"}}
+
+data: {"id":"6d12d159-ec67-46e6-8d43-18480ce7f6ca","jsonrpc":"2.0","result":{"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","final":false,"kind":"status-update","status":{"message":{"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","kind":"message","messageId":"e72127a6-4830-4320-bf23-235ac79b9a13","parts":[{"kind":"text","text":"Processing the exchange rates.."}],"role":"agent","taskId":"423a2569-f272-4d75-a4d1-cdc6682188e5"},"state":"working"},"taskId":"423a2569-f272-4d75-a4d1-cdc6682188e5"}}
+
+data: {"id":"6d12d159-ec67-46e6-8d43-18480ce7f6ca","jsonrpc":"2.0","result":{"artifact":{"artifactId":"08373241-a745-4abe-a78b-9ca60882bcc6","name":"conversion_result","parts":[{"kind":"text","text":"10 USD is 856.2 INR."}]},"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","kind":"artifact-update","taskId":"423a2569-f272-4d75-a4d1-cdc6682188e5"}}
+
+data: {"id":"6d12d159-ec67-46e6-8d43-18480ce7f6ca","jsonrpc":"2.0","result":{"contextId":"cd09e369-340a-4563-bca4-e5f2e0b9ff81","final":true,"kind":"status-update","status":{"state":"completed"},"taskId":"423a2569-f272-4d75-a4d1-cdc6682188e5"}}
+```
+
+The sequence is:
+1. **Frame 1** — `kind: task`, state `submitted` — task created, IDs assigned.
+2. **Frame 2** — `kind: status-update`, `final: false` — agent began working, first intermediate message.
+3. **Frame 3** — `kind: status-update`, `final: false` — second intermediate progress message.
+4. **Frame 4** — `kind: artifact-update` — result artifact delivered.
+5. **Frame 5** — `kind: status-update`, `final: true`, state `completed` — stream closes.
+
+## Python streaming executor
+
+The `CurrencyAgentExecutor` from `samples/python/agents/langgraph/app/agent_executor.py` demonstrates how to drive a streaming executor by iterating over an async generator and mapping agent output to A2A events:
+
+```python
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue
+from a2a.server.tasks import TaskUpdater
+from a2a.types import (
+    InternalError,
+    InvalidParamsError,
+    Part,
+    TaskState,
+    TextPart,
+    UnsupportedOperationError,
+)
+from a2a.utils import new_agent_text_message, new_task
+from a2a.utils.errors import ServerError
+
+
+class CurrencyAgentExecutor(AgentExecutor):
+    """Currency Conversion AgentExecutor Example."""
+
+    def __init__(self):
+        self.agent = CurrencyAgent()
+
+    async def execute(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
+        query = context.get_user_input()
+        task = context.current_task
+        if not task:
+            # Create a new task and publish it immediately so the client
+            # receives the taskId/contextId in the very first SSE frame.
+            task = new_task(context.message)
+            await event_queue.enqueue_event(task)
+
+        updater = TaskUpdater(event_queue, task.id, task.context_id)
+
+        try:
+            # Iterate over the async generator produced by the agent.
+            # Each yielded item describes whether the task is complete,
+            # needs user input, or is still progressing.
+            async for item in self.agent.stream(query, task.context_id):
+                is_task_complete = item['is_task_complete']
+                require_user_input = item['require_user_input']
+
+                if not is_task_complete and not require_user_input:
+                    # Intermediate progress — emit a working status-update.
+                    await updater.update_status(
+                        TaskState.working,
+                        new_agent_text_message(
+                            item['content'],
+                            task.context_id,
+                            task.id,
+                        ),
+                    )
+                elif require_user_input:
+                    # Agent needs clarification — pause and await user reply.
+                    await updater.update_status(
+                        TaskState.input_required,
+                        new_agent_text_message(
+                            item['content'],
+                            task.context_id,
+                            task.id,
+                        ),
+                        final=True,  # Mark this as the last event for now.
+                    )
+                    break
+                else:
+                    # Task is complete — emit the artifact then close the task.
+                    await updater.add_artifact(
+                        [Part(root=TextPart(text=item['content']))],
+                        name='conversion_result',
+                    )
+                    await updater.complete()
+                    break
+
+        except Exception as e:
+            raise ServerError(error=InternalError()) from e
+
+    async def cancel(
+        self, context: RequestContext, event_queue: EventQueue
+    ) -> None:
+        raise ServerError(error=UnsupportedOperationError())
+```
+
+## Client-side streaming
+
+The A2A Python client SDK handles SSE deserialization transparently. Pass `ClientConfig(streaming=True)` and iterate over `send_message` the same way as for non-streaming calls:
+
+```python
+from a2a.client import ClientConfig, create_client
+from a2a.helpers import new_text_message
+from a2a.types import Role, SendMessageRequest
+
+message = new_text_message('how much is 10 USD in INR?', role=Role.ROLE_USER)
+request = SendMessageRequest(message=message)
+
+client_config = ClientConfig(streaming=True)
+client = await create_client(agent=public_agent_card, client_config=client_config)
+
+async for chunk in client.send_message(request):
+    print(chunk)  # Each chunk is a deserialized SSE event object
+
+await client.close()
+```
+
+<Tip>
+  For non-streaming fallback, swap `ClientConfig(streaming=True)` for `ClientConfig(streaming=False)` and call the same `send_message` method. The SDK routes to `message/send` instead of `message/stream` automatically — no other code changes required.
+</Tip>
+
+<Warning>
+  The SSE connection remains open until the server emits `final: true`. If your executor raises an unhandled exception before setting `final=True`, the client will hang until its own timeout fires. Always wrap executor logic in a `try/except` and emit a terminal state on error.
+</Warning>

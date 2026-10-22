@@ -1,0 +1,333 @@
+---
+title: "Java A2A Samples: Spring Boot, Quarkus, and Custom SDK"
+sidebarTitle: "Java"
+description: "Build A2A-compliant agents in Java using Spring Boot, Quarkus LangChain4j, and a custom Maven SDK. Covers five sample agents with streaming, security, and multi-transport."
+---
+
+The A2A Java samples cover two complementary approaches to building Agent-to-Agent protocol agents: a custom Maven multi-module implementation (`custom_java_impl`) that includes its own model, server, and client SDKs built on Spring Boot and Spring AI, and a collection of Quarkus LangChain4j-based sample agents (`agents/`) that use the official [A2A Java SDK](https://github.com/a2aproject/a2a-java). Both paths demonstrate the full A2A lifecycle — AgentCard publication, JSON-RPC task dispatch, SSE streaming, and standardized error codes.
+
+<Warning>
+  All Java samples are for demonstration purposes only. Treat all data received from external agents as untrusted. Sanitize AgentCard fields, messages, and artifacts before using them in LLM prompts to prevent prompt injection attacks.
+</Warning>
+
+## Available Samples
+
+<CardGroup cols={2}>
+  <Card title="Custom Java Implementation" icon="cube">
+    Maven multi-module project (`model`, `server`, `client`) providing a complete Spring Boot A2A SDK with an AI translation service demo.
+  </Card>
+  <Card title="Dice Agent (Multi-Transport)" icon="dice">
+    Quarkus LangChain4j agent that rolls dice and checks primality. Supports both gRPC and JSON-RPC transports on a unified port.
+  </Card>
+  <Card title="Weather MCP Agent" icon="cloud-sun">
+    Provides weather information using the Model Context Protocol (MCP). Integrates with the Python `weather_and_airbnb_planner` multi-agent host.
+  </Card>
+  <Card title="Magic 8 Ball Agent (Security)" icon="shield-halved">
+    Answers yes/no questions via a Magic 8 Ball. Demonstrates Keycloak bearer token authentication for securing an A2A server.
+  </Card>
+  <Card title="Content Writer Agent" icon="pen">
+    Generates engaging content from an outline using Quarkus LangChain4j. Participates in the `content_creation` multi-agent host.
+  </Card>
+  <Card title="Content Editor Agent" icon="spell-check">
+    Proofreads and polishes content using Quarkus LangChain4j. Pairs with the Content Writer in a multi-agent pipeline.
+  </Card>
+</CardGroup>
+
+## Custom Java Implementation
+
+The `custom_java_impl` directory contains a self-contained Spring Boot Maven project that implements the full A2A protocol from scratch across three modules.
+
+### Project Structure
+
+```text
+samples/java/custom_java_impl/
+├── model/     # A2A protocol data models (Task, Message, AgentCard, JSON-RPC types)
+├── server/    # Spring Boot A2A server SDK + AI translation service
+├── client/    # Pure Java A2A client SDK + translation example
+└── pom.xml    # Parent Maven configuration (Spring Boot 3.5.0, Spring AI 1.0.0)
+```
+
+### Module Overview
+
+<Tabs>
+  <Tab title="Model Module">
+    Core data classes for JSON-RPC 2.0 and A2A protocol:
+
+    | Category | Classes |
+    |----------|---------|
+    | Message | `Message`, `Part`, `TextPart`, `Artifact` |
+    | Task | `Task`, `TaskStatus`, `TaskState` |
+    | Agent | `AgentCard`, `AgentCapabilities`, `AgentSkill` |
+    | JSON-RPC | `JSONRPCRequest`, `JSONRPCResponse`, `JSONRPCError` |
+    | Events | `TaskStatusUpdateEvent`, `TaskArtifactUpdateEvent` |
+  </Tab>
+  <Tab title="Server Module">
+    Spring Boot server SDK with Spring AI integration:
+
+    - `A2AServer` — manages agent behavior and task routing
+    - `A2AController` — REST controller for `/a2a` and `/.well-known/agent-card.json`
+    - `TaskHandler` — interface for implementing custom task processing logic
+    - `A2AServerConfiguration` — example translation bot wired to Spring AI `ChatClient`
+
+    Supports synchronous (`message/send`), streaming (`message/stream` via SSE), and agent discovery endpoints.
+  </Tab>
+  <Tab title="Client Module">
+    Pure Java client SDK:
+
+    - `A2AClient` — full A2A operations: agent discovery, `message/send`, `tasks/get`, `tasks/cancel`
+    - `StreamingEventListener` — interface for handling SSE events
+    - `A2AClientException` — typed exception for A2A protocol errors
+    - `A2AClientExample` — complete translation client demonstrating all operations
+  </Tab>
+</Tabs>
+
+### Parent POM
+
+The `custom_java_impl` parent `pom.xml` manages shared dependency versions:
+
+```xml
+<parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.5.0</version>
+</parent>
+
+<properties>
+    <java.version>17</java.version>
+    <spring-ai.version>1.0.0</spring-ai.version>
+</properties>
+
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-bom</artifactId>
+            <version>${spring-ai.version}</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+```
+
+### Build and Run the Translation Service
+
+<Steps>
+  <Step title="Compile all modules">
+    ```bash
+    cd samples/java/custom_java_impl
+    ./mvnw clean install -DskipTests
+    ```
+  </Step>
+  <Step title="Configure AI provider environment variables">
+    <CodeGroup>
+      ```bash OpenAI
+      export OPENAI_API_KEY="your-openai-api-key"
+      export OPENAI_BASE_URL="https://api.openai.com"
+      export OPENAI_CHAT_MODEL="gpt-4o"
+      ```
+
+      ```bash GCP (Gemini via Vertex)
+      export OPENAI_API_KEY="your-gcp-api-key"
+      export OPENAI_BASE_URL="https://{location}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{location}/endpoints/openapi"
+      export OPENAI_CHAT_MODEL="gemini-2.5-pro-preview-05-06"
+      ```
+    </CodeGroup>
+  </Step>
+  <Step title="Start the translation server">
+    ```bash
+    cd server
+    ../mvnw spring-boot:run
+    ```
+
+    The server starts at `http://localhost:8080` and exposes:
+
+    | Endpoint | Description |
+    |----------|-------------|
+    | `GET /.well-known/agent-card.json` | Agent discovery |
+    | `POST /a2a` | Standard JSON-RPC requests |
+    | `POST /a2a/stream` | Server-Sent Events streaming |
+  </Step>
+  <Step title="Run the translation client">
+    In a separate terminal:
+
+    ```bash
+    cd client
+    ../mvnw exec:java -Dexec.mainClass="com.google.a2a.client.A2AClientExample"
+    ```
+  </Step>
+</Steps>
+
+### API Examples
+
+<CodeGroup>
+  ```bash Get Agent Card
+  curl -X GET http://localhost:8080/.well-known/agent-card.json \
+    -H "Accept: application/json"
+  ```
+
+  ```bash Send a Task (message/send)
+  curl -X POST http://localhost:8080/a2a \
+    -H "Content-Type: application/json" \
+    -d '{
+      "jsonrpc": "2.0",
+      "id": "request-1",
+      "method": "message/send",
+      "params": {
+        "id": "translation-task-1",
+        "message": {
+          "messageId": "msg-1",
+          "kind": "message",
+          "role": "user",
+          "parts": [
+            {
+              "kind": "text",
+              "text": "Hello, world!"
+            }
+          ]
+        }
+      }
+    }'
+  ```
+
+  ```bash Streaming (message/stream via SSE)
+  curl -X POST http://localhost:8080/a2a/stream \
+    -H "Content-Type: application/json" \
+    -H "Accept: text/event-stream" \
+    -d '{
+      "jsonrpc": "2.0",
+      "id": "stream-request-1",
+      "method": "message/send",
+      "params": {
+        "id": "streaming-translation-task",
+        "message": {
+          "messageId": "stream-msg-1",
+          "kind": "message",
+          "role": "user",
+          "parts": [
+            {
+              "kind": "text",
+              "text": "Hello world!"
+            }
+          ]
+        }
+      }
+    }'
+  ```
+</CodeGroup>
+
+## Quarkus Agent Samples
+
+The `samples/java/agents/` directory contains five agents built on the [A2A Java SDK](https://github.com/a2aproject/a2a-java) (`io.a2a.sdk` version `0.3.2.Final`) and Quarkus `3.26.1` with LangChain4j `1.3.1`. All agents are managed under a shared parent POM (`agents/pom.xml`).
+
+### Shared Parent POM Properties
+
+```xml
+<groupId>com.samples.a2a</groupId>
+<artifactId>agents-parent</artifactId>
+<version>0.1.0</version>
+
+<properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <io.a2a.sdk.version>0.3.2.Final</io.a2a.sdk.version>
+    <quarkus.platform.version>3.26.1</quarkus.platform.version>
+    <quarkus.langchain4j.version>1.3.1</quarkus.langchain4j.version>
+    <protobuf.version>4.31.1</protobuf.version>
+</properties>
+```
+
+### Dice Agent (Multi-Transport)
+
+The Dice Agent rolls dice and checks if numbers are prime. It is the primary multi-transport demonstration — the agent serves both gRPC and JSON-RPC on a single unified port (`11000`), and the A2A Java client automatically selects gRPC as the preferred transport based on the AgentCard.
+
+<Steps>
+  <Step title="Navigate to the server directory">
+    ```bash
+    cd samples/java/agents/dice_agent_multi_transport/server
+    ```
+  </Step>
+  <Step title="Set your Gemini API key">
+    ```bash
+    export QUARKUS_LANGCHAIN4J_AI_GEMINI_API_KEY=your_api_key_here
+    ```
+  </Step>
+  <Step title="Start the agent server (default port 11000)">
+    ```bash
+    mvn quarkus:dev
+    ```
+
+    To override the port:
+
+    ```bash
+    mvn quarkus:dev -Dquarkus.http.port=11001
+    ```
+  </Step>
+  <Step title="Run the Java test client via JBang">
+    ```bash
+    cd samples/java/agents/dice_agent_multi_transport/client/src/main/java/com/samples/a2a/client
+    jbang TestClientRunner.java
+    ```
+
+    With a custom message:
+
+    ```bash
+    jbang TestClientRunner.java --message "Can you roll a 12-sided die and check if the result is prime?"
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The gRPC + JSON-RPC unified port is configured in `application.properties` via `quarkus.grpc.server.use-separate-server=false`. Both transports share port `11000` by default.
+</Note>
+
+You can also interact with the Dice Agent using the Python A2A client:
+
+```bash
+cd samples/python/agents/dice_agent_grpc
+uv run test_client.py
+```
+
+### Running Other Quarkus Agents
+
+All Quarkus agents follow the same pattern: navigate to the agent's `server/` directory, configure an API key, and run `mvn quarkus:dev`.
+
+<Tabs>
+  <Tab title="Weather MCP">
+    ```bash
+    cd samples/java/agents/weather_mcp/server
+    # Set the required LLM API key per the agent's README
+    mvn quarkus:dev
+    ```
+  </Tab>
+  <Tab title="Content Writer">
+    ```bash
+    cd samples/java/agents/content_writer/server
+    mvn quarkus:dev
+    ```
+  </Tab>
+  <Tab title="Content Editor">
+    ```bash
+    cd samples/java/agents/content_editor/server
+    mvn quarkus:dev
+    ```
+  </Tab>
+  <Tab title="Magic 8 Ball (Security)">
+    ```bash
+    cd samples/java/agents/magic_8_ball_security/server
+    # Requires a running Keycloak instance — see agent README for details
+    mvn quarkus:dev
+    ```
+  </Tab>
+</Tabs>
+
+<Info>
+  The Magic 8 Ball agent demonstrates Keycloak bearer token authentication. A configured Keycloak instance is required before running this sample. See `samples/java/agents/magic_8_ball_security/README.md` for setup instructions.
+</Info>
+
+## Requirements Summary
+
+| Requirement | Version |
+|-------------|---------|
+| Java | 17 or higher |
+| Maven | Included via `mvnw` wrapper |
+| JBang (dice agent client) | Latest — see [jbang.dev](https://www.jbang.dev/) |

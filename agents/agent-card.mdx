@@ -1,0 +1,220 @@
+---
+title: "AgentCard: Defining and Publishing Agent Identity"
+sidebarTitle: "Agent Card"
+description: "Learn how to define an AgentCard to expose your agent's identity, skills, and capabilities for discovery via the /.well-known/agent.json endpoint."
+---
+
+The Agent2Agent protocol uses an **AgentCard** as the primary mechanism for agent discovery. Hosted at `/.well-known/agent.json`, it is a structured JSON document that tells clients exactly what your agent can do, which protocols it speaks, and how to reach it. This page covers every field of `AgentCard`, `AgentSkill`, `AgentCapabilities`, and `AgentInterface`, and shows how to construct them in Python using the helloworld sample.
+
+## AgentCard fields
+
+<ParamField path="name" type="string" required>
+  Human-readable name of the agent. Shown in UIs and logs. Example: `"Hello World Agent"`.
+</ParamField>
+
+<ParamField path="description" type="string" required>
+  A short, plain-text summary of what the agent does. Clients may display this in discovery UIs.
+</ParamField>
+
+<ParamField path="version" type="string" required>
+  SemVer string for this agent release. Use it to communicate breaking changes to clients. Example: `"0.0.1"`.
+</ParamField>
+
+<ParamField path="default_input_modes" type="list[string]" required>
+  Ordered list of MIME types the agent accepts by default when a skill does not override them. Example: `["text/plain"]`.
+</ParamField>
+
+<ParamField path="default_output_modes" type="list[string]" required>
+  Ordered list of MIME types the agent produces by default. Example: `["text/plain"]`.
+</ParamField>
+
+<ParamField path="capabilities" type="AgentCapabilities" required>
+  Feature flags that signal optional protocol behaviour such as SSE streaming and extended card support. See [AgentCapabilities](#agentcapabilities-fields) below.
+</ParamField>
+
+<ParamField path="supported_interfaces" type="list[AgentInterface]" required>
+  One or more network endpoints and their protocol bindings. See [AgentInterface](#agentinterface-fields) below.
+</ParamField>
+
+<ParamField path="skills" type="list[AgentSkill]" required>
+  The discrete abilities this agent exposes. At least one skill is required. See [AgentSkill](#agentskill-fields) below.
+</ParamField>
+
+<ParamField path="icon_url" type="string">
+  Optional URL pointing to an image that represents the agent in discovery UIs.
+</ParamField>
+
+## AgentSkill fields
+
+An `AgentSkill` describes a single, discrete function or capability that the agent can perform. Clients use skill metadata to route requests intelligently.
+
+<ParamField path="id" type="string" required>
+  Machine-readable, unique identifier for this skill within the agent. Example: `"echo_bot"`.
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  Human-readable label. Example: `"Echo Bot"`.
+</ParamField>
+
+<ParamField path="description" type="string" required>
+  Explains what the skill does and when to invoke it. Used by orchestrating agents to select the right skill.
+</ParamField>
+
+<ParamField path="input_modes" type="list[string]">
+  MIME types accepted for this skill specifically. Overrides `default_input_modes` when present. Example: `["text/plain"]`.
+</ParamField>
+
+<ParamField path="output_modes" type="list[string]">
+  MIME types produced by this skill specifically. Overrides `default_output_modes` when present.
+</ParamField>
+
+<ParamField path="tags" type="list[string]">
+  Freeform labels used for discovery and filtering. Example: `["a2a", "echo-example"]`.
+</ParamField>
+
+<ParamField path="examples" type="list[string]">
+  Sample user inputs that illustrate how to invoke the skill. Example: `["hi", "how are you"]`.
+</ParamField>
+
+## AgentCapabilities fields
+
+`AgentCapabilities` is a compact flags object placed inside the `AgentCard`. Its fields toggle optional A2A protocol features.
+
+<ParamField path="streaming" type="bool" default="false">
+  When `True`, the agent supports the `message/stream` JSON-RPC method and will emit Server-Sent Events (SSE). Clients that see this flag may choose the streaming path instead of `message/send`.
+</ParamField>
+
+<ParamField path="extended_agent_card" type="bool" default="false">
+  When `True`, authenticated clients may call `agent/authenticatedExtendedCard` to receive a richer card with additional skills or metadata not present in the public card.
+</ParamField>
+
+## AgentInterface fields
+
+Each entry in `supported_interfaces` describes one concrete network endpoint the agent listens on.
+
+<ParamField path="protocol_binding" type="string" required>
+  Transport layer. Currently `"JSONRPC"` is the standard value; `"GRPC"` and `"HTTP_JSON"` are also supported in the SDK.
+</ParamField>
+
+<ParamField path="url" type="string" required>
+  Full base URL of the endpoint. Example: `"http://127.0.0.1:9999"`.
+</ParamField>
+
+<ParamField path="protocol_version" type="string" required>
+  Version of the A2A protocol spoken at this endpoint. Example: `"1.0"`.
+</ParamField>
+
+## Full helloworld example
+
+The snippet below is taken directly from `samples/python/agents/helloworld/__main__.py`. It constructs both a public `AgentCard` and an extended card that is served only to authenticated clients.
+
+```python
+from a2a.types import (
+    AgentCapabilities,
+    AgentCard,
+    AgentInterface,
+    AgentSkill,
+)
+
+# Defines the abilities or functions that the agent can perform.
+skill = AgentSkill(
+    id='echo_bot',
+    name='Echo Bot',
+    description='An example agent that acknowledges client request and responds with a "Hello World" message.',
+    input_modes=['text/plain'],
+    output_modes=['text/plain'],
+    tags=['a2a', 'echo-example'],
+    examples=['hi', 'how are you'],
+)
+
+# An optional skill visible only to authenticated users via the extended card.
+extended_skill = AgentSkill(
+    id='echo_bot_super_mode',
+    name='Echo Bot (Super Mode)',
+    description='An extended version of Echo Bot that responds with extra enthusiasm!',
+    tags=['a2a', 'echo-example', 'extended'],
+    examples=['super hi', 'give me a super hello'],
+)
+
+# Define a public-facing agent card that allows clients to discover your agent's capabilities.
+public_agent_card = AgentCard(
+    name='Hello World Agent',
+    description='Just a hello world agent',
+    version='0.0.1',
+    default_input_modes=['text/plain'],
+    default_output_modes=['text/plain'],
+    capabilities=AgentCapabilities(streaming=True, extended_agent_card=True),
+    supported_interfaces=[
+        AgentInterface(
+            protocol_binding='JSONRPC',
+            url='http://127.0.0.1:9999',
+            protocol_version='1.0',
+        )
+    ],
+    skills=[skill],
+    # icon_url='https://example.com/agent-icon.png'  # optional
+)
+
+# Extended card served to authenticated users — includes both skills.
+extended_agent_card = AgentCard(
+    name='Hello World Agent - Extended Edition',
+    description='The full-featured hello world agent for authenticated users.',
+    version='0.0.2',
+    default_input_modes=['text/plain'],
+    default_output_modes=['text/plain'],
+    capabilities=AgentCapabilities(streaming=True, extended_agent_card=True),
+    supported_interfaces=[
+        AgentInterface(
+            protocol_binding='JSONRPC',
+            url='http://127.0.0.1:9999',
+            protocol_version='1.0',
+        )
+    ],
+    skills=[skill, extended_skill],
+)
+```
+
+## Discovery endpoint
+
+The A2A SDK automatically registers the `/.well-known/agent.json` route when you call `create_agent_card_routes`. No manual route setup is required.
+
+```python
+from a2a.server.routes import create_agent_card_routes
+
+routes = []
+routes.extend(create_agent_card_routes(public_agent_card))
+```
+
+A client hitting `GET /.well-known/agent.json` receives the public card as JSON. The extended card is accessible at `agent/authenticatedExtendedCard` for authenticated clients using the A2A client SDK:
+
+```python
+import httpx
+from a2a.client import A2ACardResolver
+
+async with httpx.AsyncClient() as httpx_client:
+    resolver = A2ACardResolver(
+        httpx_client=httpx_client,
+        base_url='http://127.0.0.1:9999',
+    )
+    public_agent_card = await resolver.get_agent_card()
+```
+
+## Extended agent cards
+
+When `AgentCapabilities(extended_agent_card=True)` is set, authenticated clients can retrieve a richer version of the card. Pass both cards to `DefaultRequestHandler` and the SDK handles routing automatically.
+
+```python
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore
+
+request_handler = DefaultRequestHandler(
+    agent_executor=HelloWorldAgentExecutor(),
+    task_store=InMemoryTaskStore(),
+    agent_card=public_agent_card,           # served to everyone
+    extended_agent_card=extended_agent_card, # served after authentication
+)
+```
+
+<Note>
+  The extended card is designed for privilege escalation: keep sensitive skill descriptions or internal endpoints out of the public card and expose them only in the extended one.
+</Note>

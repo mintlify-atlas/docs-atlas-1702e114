@@ -1,0 +1,368 @@
+---
+title: "Multimodal Messaging: A2A Part Types and File Upload"
+sidebarTitle: "Multimodal"
+description: "Explore A2A's three message Part types — TextPart, FilePart, and DataPart — how agents declare input/output modes, and how to send files in a task message."
+---
+
+A2A messages are composed of one or more **Parts**, each carrying a distinct kind of content. This design lets a single message combine free-form text, binary file data, and structured JSON objects — supporting rich, multimodal interactions between agents. This page covers the three Part types (`TextPart`, `FilePart`, `DataPart`), how agents advertise the modalities they support through `AgentSkill`, and the full file-upload pattern used by the LlamaIndex file-chat sample.
+
+---
+
+## The Three Part Types
+
+Every `Part` object has a discriminating `kind` field that tells the receiver how to interpret its payload.
+
+### TextPart
+
+Used for plain prose, markdown, instructions, or any UTF-8 text content.
+
+<ParamField body="kind" type="string" required>
+  Always `"text"` for a TextPart.
+</ParamField>
+
+<ParamField body="text" type="string" required>
+  The UTF-8 text content of this part.
+</ParamField>
+
+```json json
+{
+  "kind": "text",
+  "text": "How much is 10 USD in EUR?"
+}
+```
+
+In Python, `TextPart` is imported from `a2a.types` and wrapped in a `Part` envelope:
+
+```python python
+# samples/python/agents/langgraph/app/agent_executor.py
+from a2a.types import Part, TextPart
+
+await updater.add_artifact(
+    [Part(root=TextPart(text=item['content']))],
+    name='conversion_result',
+)
+```
+
+---
+
+### FilePart
+
+Used to transfer binary file content — PDFs, images, audio, video, or any MIME type — between a client and an agent.
+
+<ParamField body="kind" type="string" required>
+  Always `"file"` for a FilePart.
+</ParamField>
+
+<ParamField body="file" type="object" required>
+  A file descriptor object. Exactly one of `uri` or `bytes` must be present.
+
+  <Expandable title="file descriptor fields">
+    <ParamField body="uri" type="string">
+      A URL pointing to the file. The agent fetches it at processing time. Use this for large files or when the client has a publicly accessible storage URL.
+    </ParamField>
+    <ParamField body="bytes" type="string">
+      Base64-encoded binary content of the file, inlined directly into the message. Suitable for smaller files that should not require a separate HTTP fetch.
+    </ParamField>
+    <ParamField body="mimeType" type="string">
+      The MIME type of the file, e.g. `"application/pdf"`, `"image/png"`, `"image/jpeg"`. Strongly recommended so the agent can dispatch correctly without probing the content.
+    </ParamField>
+    <ParamField body="name" type="string">
+      Human-readable filename, e.g. `"attention.pdf"`. Used by agents that need to surface a name to downstream tools or logs.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<Tabs>
+  <Tab title="Inline bytes (base64)">
+    ```json json
+    {
+      "kind": "file",
+      "file": {
+        "bytes": "JVBERi0xLjQKJeLjz9MK...",
+        "mimeType": "application/pdf",
+        "name": "attention.pdf"
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Remote URI">
+    ```json json
+    {
+      "kind": "file",
+      "file": {
+        "uri": "https://storage.example.com/docs/report.pdf",
+        "mimeType": "application/pdf",
+        "name": "report.pdf"
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+The LlamaIndex file-chat executor unpacks a `FilePart` from incoming message parts:
+
+```python python
+# samples/python/agents/llama_index_file_chat/agent_executor.py
+from a2a.types import FilePart, TextPart
+
+def _get_input_event(self, context: RequestContext) -> InputEvent:
+    """Extract file attachment if present in the message parts."""
+    file_data = None
+    file_name = None
+    text_parts = []
+    for p in context.message.parts:
+        part = p.root
+        if isinstance(part, FilePart):
+            file_data = part.file.bytes
+            file_name = part.file.name
+            if file_data is None:
+                raise ValueError('File data is missing!')
+        elif isinstance(part, TextPart):
+            text_parts.append(part.text)
+        else:
+            raise ValueError(f'Unsupported part type: {type(part)}')
+
+    return InputEvent(
+        msg='\n'.join(text_parts),
+        attachment=file_data,
+        file_name=file_name,
+    )
+```
+
+---
+
+### DataPart
+
+Used to convey structured JSON objects — form schemas, tool results, structured data payloads — without serialising them as text.
+
+<ParamField body="kind" type="string" required>
+  Always `"data"` for a DataPart.
+</ParamField>
+
+<ParamField body="data" type="object" required>
+  An arbitrary JSON object. The schema is application-defined; agents should document expected shapes in their `AgentSkill.description`.
+</ParamField>
+
+```json json
+{
+  "kind": "data",
+  "data": {
+    "form": "expense_reimbursement",
+    "fields": [
+      { "name": "amount", "type": "number", "label": "Amount (USD)" },
+      { "name": "description", "type": "string", "label": "Description" }
+    ]
+  }
+}
+```
+
+The expense-reimbursement sample emits a `DataPart` when returning a form to the client:
+
+```python python
+# samples/python/agents/adk_expense_reimbursement/agent_executor.py
+from a2a.types import DataPart, Part
+
+if isinstance(item['content'], dict):
+    if (
+        'response' in item['content']
+        and 'result' in item['content']['response']
+    ):
+        data = json.loads(item['content']['response']['result'])
+        await updater.update_status(
+            TaskState.input_required,
+            new_agent_parts_message(
+                [Part(root=DataPart(data=data))],
+                task.context_id,
+                task.id,
+            ),
+            final=True,
+        )
+```
+
+The MCP orchestrator agent uses `DataPart` alongside `TextPart` when returning structured tool output:
+
+```python python
+# samples/python/agents/a2a_mcp/src/a2a_mcp/common/agent_executor.py
+from a2a.types import DataPart, TextPart
+
+if isinstance(item['content'], dict):
+    part = DataPart(data=item['content'])
+else:
+    part = TextPart(text=item['content'])
+```
+
+---
+
+## Declaring Modalities on AgentSkill
+
+Agents advertise which input and output modalities they support through `default_input_modes` and `default_output_modes` on the `AgentCard`, and optionally per-skill overrides. Values are MIME type strings (`"text/plain"`, `"application/pdf"`) or short aliases (`"text"`).
+
+```python python
+# samples/python/agents/llama_index_file_chat/agent_executor.py
+
+class LlamaIndexAgentExecutor(AgentExecutor):
+    SUPPORTED_INPUT_TYPES = [
+        'text/plain',
+        'application/pdf',
+        'application/msword',
+        'image/png',
+        'image/jpeg',
+    ]
+    SUPPORTED_OUTPUT_TYPES = ['text', 'text/plain']
+```
+
+These lists are referenced when building the `AgentCard`:
+
+```python python
+# samples/python/agents/llama_index_file_chat/__main__.py
+agent_card = AgentCard(
+    name='Parse and Chat',
+    description='Parses a file and then chats with a user using the parsed content as context.',
+    url=f'http://{host}:{port}/',
+    version='1.0.0',
+    default_input_modes=LlamaIndexAgentExecutor.SUPPORTED_INPUT_TYPES,
+    default_output_modes=LlamaIndexAgentExecutor.SUPPORTED_OUTPUT_TYPES,
+    capabilities=capabilities,
+    skills=[skill],
+)
+```
+
+Clients use `are_modalities_compatible()` from `a2a.utils` to verify that the modes they need are a subset of what the agent offers before sending a task:
+
+```python python
+# samples/python/agents/llama_index_file_chat/agent_executor.py
+from a2a.utils import are_modalities_compatible
+
+def _validate_output_modes(
+    self,
+    context: RequestContext,
+    supportedTypes: list[str],
+) -> bool:
+    accepted_output_modes = (
+        context.configuration.accepted_output_modes
+        if context.configuration
+        else []
+    )
+    if not are_modalities_compatible(
+        accepted_output_modes,
+        supportedTypes,
+    ):
+        logger.warning(
+            'Unsupported output mode. Received %s, Support %s',
+            accepted_output_modes,
+            supportedTypes,
+        )
+        return True  # True means invalid
+    return False
+```
+
+---
+
+## End-to-End: Sending a File to an Agent
+
+The following example shows a full `message/send` request containing both a `TextPart` and a `FilePart`, as used by the LlamaIndex file-chat agent:
+
+```json json
+{
+  "jsonrpc": "2.0",
+  "id": 11,
+  "method": "message/send",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "What does this file talk about?"
+        },
+        {
+          "kind": "file",
+          "file": {
+            "bytes": "JVBERi0xLjQKJeLjz9MK...",
+            "name": "attention.pdf",
+            "mimeType": "application/pdf"
+          }
+        }
+      ]
+    },
+    "configuration": {
+      "acceptedOutputModes": ["text"]
+    }
+  }
+}
+```
+
+The CLI host reads a local file, encodes it, and attaches it as a `FilePart` automatically:
+
+```python python
+# samples/python/hosts/cli/__main__.py
+from a2a.types import FilePart, FileWithBytes, Part
+
+if file_path and file_path.strip() != '':
+    with open(file_path, 'rb') as f:
+        file_content = base64.b64encode(f.read()).decode('utf-8')
+        file_name = os.path.basename(file_path)
+
+    message.parts.append(
+        Part(
+            root=FilePart(
+                file=FileWithBytes(name=file_name, bytes=file_content)
+            )
+        )
+    )
+```
+
+### Running the LlamaIndex File-Chat Agent
+
+<Steps>
+  <Step title="Set up environment">
+    ```bash bash
+    cd samples/python/agents/llama_index_file_chat
+    echo "GOOGLE_API_KEY=your_api_key_here" >> .env
+    echo "LLAMA_CLOUD_API_KEY=your_api_key_here" >> .env
+    ```
+  </Step>
+  <Step title="Start the agent">
+    ```bash bash
+    uv run . --host 0.0.0.0 --port 10010
+    ```
+  </Step>
+  <Step title="Download a sample PDF">
+    ```bash bash
+    wget https://arxiv.org/pdf/1706.03762 -O attention.pdf
+    ```
+  </Step>
+  <Step title="Run the CLI host and attach the file">
+    ```bash bash
+    cd samples/python/hosts/cli
+    uv run . --agent http://localhost:10010
+    ```
+
+    At the prompt, enter your question and provide the path to the PDF:
+
+    ```
+    What do you want to send to the agent?: What does this file talk about?
+    Select a file path to attach? (press enter to skip): ./attention.pdf
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Multi-Part Messages in Practice
+
+<CardGroup cols={3}>
+  <Card title="TextPart" icon="text-size">
+    Plain or markdown text — questions, instructions, and any UTF-8 payload. The most common Part type.
+  </Card>
+  <Card title="FilePart" icon="file">
+    Binary file content transferred either as base64-encoded `bytes` or by reference via a `uri`. Supports any MIME type.
+  </Card>
+  <Card title="DataPart" icon="brackets-curly">
+    Structured JSON objects for form schemas, tool call results, and any content that benefits from typed, parseable structure rather than free-form text.
+  </Card>
+</CardGroup>
+
+<Tip>
+  A single message can mix all three Part types. For example, an agent returning a financial report might include a `TextPart` with a narrative summary, a `FilePart` with the PDF attachment, and a `DataPart` with machine-readable key metrics.
+</Tip>

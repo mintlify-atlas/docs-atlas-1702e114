@@ -1,0 +1,341 @@
+---
+title: "Go A2A Implementation: Server, Client, and Models"
+sidebarTitle: "Go"
+description: "Explore the Go A2A sample: JSON-RPC 2.0 server and client packages, shared data models, and a runnable helloworld agent with streaming support."
+---
+
+The A2A Go sample provides a complete, idiomatic Go implementation of the Agent-to-Agent protocol built on the standard `net/http` library. It ships with a `server` package for hosting agents, a `client` package for sending tasks, a `models` package with all protocol data structures, and a self-contained `helloworld` agent that demonstrates both streaming and non-streaming communication patterns using Go's native iterators.
+
+<Warning>
+  This is sample code for demonstration purposes only. It lacks production-grade error handling, security measures, and performance optimizations. All data received from an external agent should be treated as untrusted input.
+</Warning>
+
+## Prerequisites
+
+- Go **1.24** or later (the helloworld agent requires Go 1.25 or higher for native iterator support)
+
+## Project Structure
+
+```text
+samples/go/
+├── agents/
+│   └── helloworld/       # Standalone Hello World A2A agent + test client
+│       ├── main.go       # Server setup, AgentCard configuration, route registration
+│       ├── agent_executor.go  # AgentExecutor interface implementation
+│       └── test_client.go    # Demonstrates card fetching and message requests
+├── client/
+│   └── client.go         # A2A client (SendTask, GetTask, CancelTask, streaming)
+├── server/
+│   └── server.go         # A2A server (JSON-RPC dispatch, task store, SSE streaming)
+└── models/
+    └── a2a.go            # All shared protocol types
+```
+
+## Helloworld Agent
+
+The helloworld agent is the canonical starting point. It starts an HTTP server on port `9999`, registers an AgentCard at `/.well-known/agent-card`, exposes a JSON-RPC endpoint at `/`, and immediately runs a built-in test client to demonstrate the full request/response cycle.
+
+### Running the Agent
+
+<Steps>
+  <Step title="Navigate to the helloworld directory">
+    ```bash
+    cd samples/go/agents/helloworld
+    ```
+  </Step>
+  <Step title="Download dependencies">
+    ```bash
+    go mod download
+    ```
+  </Step>
+  <Step title="Run the server and test client">
+    ```bash
+    go run .
+    ```
+
+    You will see output confirming the AgentCard was fetched, intermediate `working` status events, and the final completed response:
+
+    ```text
+    Starting A2A server on http://127.0.0.1:9999...
+    Successfully fetched the public agent card:
+    Name        : Hello World Agent
+    Description : Just a hello world agent
+    Version     : 0.0.1
+    Streaming   : true
+    ...
+    task_state: TASK_STATE_COMPLETED
+    artifacts { parts { text: "Hello, World! I have received your request (Say hello.)" } }
+    ```
+  </Step>
+</Steps>
+
+### Building and Running as a Container
+
+<Steps>
+  <Step title="Build the container image">
+    ```bash
+    podman build . -t helloworld-a2a-server
+    ```
+  </Step>
+  <Step title="Run the container">
+    ```bash
+    podman run -p 9999:9999 helloworld-a2a-server
+    ```
+  </Step>
+  <Step title="Connect via the Python CLI host">
+    ```bash
+    cd samples/python/hosts/cli
+    uv run . --agent http://127.0.0.1:9999
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+  `podman` is fully interchangeable with `docker` in all commands above.
+</Tip>
+
+## AgentCard and Server Setup (`main.go`)
+
+The `main.go` file in the helloworld agent shows how to construct an `AgentCard`, wire up the `RequestHandler`, and register routes:
+
+```go
+skill := a2a.AgentSkill{
+    ID:          "echo_bot",
+    Name:        "Echo Bot",
+    Description: "An example agent that acknowledges client request and responds with a \"Hello World\" message.",
+    InputModes:  []string{"text/plain"},
+    OutputModes: []string{"text/plain"},
+    Tags:        []string{"a2a", "echo-example"},
+    Examples:    []string{"hi", "how are you"},
+}
+
+publicAgentCard := &a2a.AgentCard{
+    Name:               "Hello World Agent",
+    Description:        "Just a hello world agent",
+    Version:            "0.0.1",
+    DefaultInputModes:  []string{"text/plain"},
+    DefaultOutputModes: []string{"text/plain"},
+    Capabilities:       a2a.AgentCapabilities{Streaming: true, ExtendedAgentCard: true},
+    SupportedInterfaces: []*a2a.AgentInterface{
+        {
+            ProtocolBinding: a2a.TransportProtocolJSONRPC,
+            ProtocolVersion: a2a.Version,
+            URL:             "http://127.0.0.1:9999",
+        },
+    },
+    Skills: []a2a.AgentSkill{skill},
+}
+
+requestHandler := a2asrv.NewHandler(
+    NewHelloWorldAgentExecutor(),
+    a2asrv.WithExtendedAgentCard(extendedAgentCard),
+)
+
+mux := http.NewServeMux()
+mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(publicAgentCard))
+mux.Handle("/", a2asrv.NewJSONRPCHandler(requestHandler))
+```
+
+## AgentExecutor Interface (`agent_executor.go`)
+
+Implement `a2asrv.AgentExecutor` to process tasks. The `Execute` method returns a Go native iterator (`iter.Seq2`) that yields A2A events — enabling streaming task progress updates over SSE:
+
+```go
+type HelloWorldAgentExecutor struct {
+    agent *HelloWorldAgent
+}
+
+func (e *HelloWorldAgentExecutor) Execute(
+    _ context.Context,
+    execCtx *a2asrv.ExecutorContext,
+) iter.Seq2[a2a.Event, error] {
+    return func(yield func(a2a.Event, error) bool) {
+        // 1. Yield submitted task event for new tasks
+        if execCtx.StoredTask == nil {
+            if !yield(a2a.NewSubmittedTask(execCtx, execCtx.Message), nil) {
+                return
+            }
+        }
+
+        // 2. Update status to WORKING
+        workingMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Processing request..."))
+        if !yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, workingMsg), nil) {
+            return
+        }
+
+        // 3. Invoke the agent and yield the completed event
+        var query string
+        for _, part := range execCtx.Message.Parts {
+            if text := part.Text(); text != "" {
+                query = text
+                break
+            }
+        }
+        result := e.agent.Invoke(query)
+
+        completedMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(result))
+        yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, completedMsg), nil)
+    }
+}
+
+func (e *HelloWorldAgentExecutor) Cancel(
+    _ context.Context,
+    _ *a2asrv.ExecutorContext,
+) iter.Seq2[a2a.Event, error] {
+    return func(yield func(a2a.Event, error) bool) {
+        yield(nil, fmt.Errorf("cancel is not supported"))
+    }
+}
+```
+
+## Client Package
+
+The `client` package exposes an `AgentClient` struct with four methods mapping directly to the A2A JSON-RPC methods.
+
+### Client Struct
+
+```go
+// NewClient creates a new A2A client targeting the given base URL.
+func NewClient(baseURL string) *Client {
+    return &Client{
+        baseURL: baseURL,
+        httpClient: &http.Client{
+            Timeout: 30 * time.Second,
+        },
+    }
+}
+```
+
+### Available Methods
+
+<Accordion title="SendTask — message/send">
+  Sends a task message to the agent and returns the completed `Task`.
+
+  ```go
+  func (c *Client) SendTask(params models.TaskSendParams) (*models.JSONRPCResponse, error)
+  ```
+
+  The method constructs a `message/send` JSON-RPC request, posts it to `baseURL`, and unmarshals the result into a `*models.Task`.
+</Accordion>
+
+<Accordion title="GetTask — tasks/get">
+  Retrieves the current status of a task by ID.
+
+  ```go
+  func (c *Client) GetTask(params models.TaskQueryParams) (*models.JSONRPCResponse, error)
+  ```
+</Accordion>
+
+<Accordion title="CancelTask — tasks/cancel">
+  Cancels a running task and transitions it to the `canceled` state.
+
+  ```go
+  func (c *Client) CancelTask(params models.TaskIDParams) (*models.JSONRPCResponse, error)
+  ```
+</Accordion>
+
+<Accordion title="SendTaskStreaming — message/stream">
+  Sends a task and streams `TaskStatusUpdateEvent` events over an SSE connection to the provided channel.
+
+  ```go
+  func (c *Client) SendTaskStreaming(
+      params models.TaskSendParams,
+      eventChan chan<- any,
+  ) error
+  ```
+
+  Sets `Accept: text/event-stream` and decodes each newline-delimited JSON event into the channel until the stream closes.
+</Accordion>
+
+## Server Package
+
+The `A2AServer` struct dispatches incoming JSON-RPC requests to the correct handler based on the `method` field, maintains an in-memory task store, and supports SSE streaming via `message/stream`.
+
+```go
+// NewA2AServer creates a server with an AgentCard and a TaskHandler function.
+func NewA2AServer(
+    agentCard models.AgentCard,
+    handler func(*models.Task, *models.Message) (*models.Task, error),
+) *A2AServer
+
+// Start binds to the configured port and begins serving.
+func (s *A2AServer) Start() error
+```
+
+Supported JSON-RPC methods:
+
+| Method | Handler |
+|--------|---------|
+| `message/send` | `handleTaskSend` — creates task, calls handler, stores result |
+| `message/stream` | `handleStreamingTask` — SSE; sends `working` then `completed` events |
+| `tasks/get` | `handleTaskGet` — looks up task by ID |
+| `tasks/cancel` | `handleTaskCancel` — sets state to `canceled` |
+
+## Models Package
+
+All protocol types live in `models/a2a.go`.
+
+### Task State
+
+```go
+type TaskState string
+
+const (
+    TaskStateSubmitted     TaskState = "submitted"
+    TaskStateWorking       TaskState = "working"
+    TaskStateInputRequired TaskState = "input-required"
+    TaskStateCompleted     TaskState = "completed"
+    TaskStateCanceled      TaskState = "canceled"
+    TaskStateFailed        TaskState = "failed"
+    TaskStateUnknown       TaskState = "unknown"
+)
+```
+
+### AgentCard
+
+```go
+type AgentCard struct {
+    Name               string             `json:"name"`
+    Description        *string            `json:"description,omitempty"`
+    URL                string             `json:"url"`
+    Provider           *AgentProvider     `json:"provider,omitempty"`
+    Version            string             `json:"version"`
+    DocumentationURL   *string            `json:"documentationUrl,omitempty"`
+    Capabilities       AgentCapabilities  `json:"capabilities"`
+    Authentication     *AgentAuthentication `json:"authentication,omitempty"`
+    DefaultInputModes  []string           `json:"defaultInputModes,omitempty"`
+    DefaultOutputModes []string           `json:"defaultOutputModes,omitempty"`
+    Skills             []AgentSkill       `json:"skills"`
+}
+```
+
+### AgentCapabilities
+
+```go
+type AgentCapabilities struct {
+    Streaming              *bool `json:"streaming,omitempty"`
+    PushNotifications      *bool `json:"pushNotifications,omitempty"`
+    StateTransitionHistory *bool `json:"stateTransitionHistory,omitempty"`
+}
+```
+
+### AgentSkill
+
+```go
+type AgentSkill struct {
+    ID          string   `json:"id"`
+    Name        string   `json:"name"`
+    Description *string  `json:"description,omitempty"`
+    Tags        []string `json:"tags,omitempty"`
+    Examples    []string `json:"examples,omitempty"`
+    InputModes  []string `json:"inputModes,omitempty"`
+    OutputModes []string `json:"outputModes,omitempty"`
+}
+```
+
+## Running the Test Suite
+
+```bash
+cd samples/go
+go test ./...
+```

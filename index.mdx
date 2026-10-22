@@ -1,20 +1,79 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Agent2Agent (A2A): Open Protocol for Multi-Agent Interoperability"
+sidebarTitle: "Home"
+description: "A2A is an open protocol that lets AI agents built with any framework communicate, delegate tasks, and collaborate via JSON-RPC over HTTP."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+Agent2Agent (A2A) is an open, language-agnostic protocol that gives AI agents a common language. Whether you're building with LangGraph, CrewAI, Google ADK, Semantic Kernel, or a custom stack, A2A lets your agents discover each other's capabilities, send tasks, stream real-time updates, and exchange multi-modal content — all over standard HTTP.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Launch a Hello World agent and talk to it with the CLI host in under five minutes.
+  </Card>
+  <Card title="Core Concepts" icon="book-open" href="/core-concepts">
+    Understand AgentCards, Tasks, Messages, Artifacts, and the JSON-RPC protocol surface.
+  </Card>
+  <Card title="Building Agents" icon="robot" href="/agents/agent-card">
+    Define your agent's skills, wire up an AgentExecutor, and serve the A2A endpoints.
+  </Card>
+  <Card title="Samples" icon="code" href="/samples/python/helloworld">
+    Browse working examples in Python, JavaScript, Go, Java, and .NET.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## Why A2A?
+
+Modern AI applications are rarely a single model. They compose multiple specialized agents — a retrieval agent, a code-generation agent, a scheduling agent — that need to hand work off to each other reliably. Without a shared protocol, every integration is bespoke wiring.
+
+A2A provides:
+
+- **Discovery** — Agents publish an `AgentCard` at `/.well-known/agent.json` describing their skills, input/output modes, and supported transports.
+- **Standardized messaging** — All communication is JSON-RPC 2.0 over HTTP, with a small, well-defined method set (`message/send`, `message/stream`, `tasks/get`, `tasks/cancel`).
+- **Streaming** — Server-Sent Events let agents push incremental status updates to clients in real time.
+- **Multi-turn tasks** — Tasks have explicit states (`submitted`, `working`, `input-required`, `completed`, `failed`) so long-running, interactive workflows are first-class.
+- **Multi-modal content** — Messages carry `text`, `file`, and `data` parts, so agents can exchange rich content beyond plain text.
+- **Extensibility** — A layered extension system allows teams to add routing (AGP), identity (Secure Passport), observability (Traceability), and more without breaking base-protocol compatibility.
+
+## How It Works
+
+<Steps>
+  <Step title="Define an AgentCard">
+    Declare your agent's identity, skills, and capabilities. The card is served at `/.well-known/agent.json` so any client can discover what your agent does.
+  </Step>
+  <Step title="Implement an AgentExecutor">
+    Subclass `AgentExecutor` and implement `execute()`. Inside, use `TaskUpdater` to move the task through its lifecycle and emit artifacts when the work is done.
+  </Step>
+  <Step title="Start the server">
+    Wire `create_agent_card_routes()` and `create_jsonrpc_routes()` into any ASGI framework (Starlette, FastAPI) and run with Uvicorn.
+  </Step>
+  <Step title="Connect a host">
+    Point the CLI host or a multi-agent host at your server's URL. The host reads the AgentCard, sends tasks, and displays results.
+  </Step>
+</Steps>
+
+## Supported Frameworks & Languages
+
+<CardGroup cols={3}>
+  <Card title="Python SDK" icon="python" href="/samples/python/helloworld">
+    LangGraph, CrewAI, ADK, Semantic Kernel, LlamaIndex, Marvin, AG2, MindsDB
+  </Card>
+  <Card title="JavaScript SDK" icon="js" href="/samples/js">
+    Node.js agents built with Genkit and the Gemini API
+  </Card>
+  <Card title="Go SDK" icon="golang" href="/samples/go">
+    Lightweight Go server and client packages
+  </Card>
+  <Card title="Java SDK" icon="java" href="/samples/java">
+    Spring Boot agents with Quarkus A2A support
+  </Card>
+  <Card title=".NET SDK" icon="microsoft" href="/samples/dotnet">
+    C# agents with Semantic Kernel integration
+  </Card>
+  <Card title="Extensions" icon="puzzle-piece" href="/extensions/overview">
+    AGP routing, Secure Passport, Timestamp, Traceability
+  </Card>
+</CardGroup>
+
+<Note>
+  A2A sample code is for demonstration purposes. When consuming data from external agents in production — including AgentCards, messages, and artifacts — treat all incoming data as untrusted input and apply appropriate input validation.
+</Note>

@@ -1,0 +1,272 @@
+---
+title: "A2A Demo Web App: Mesop UI for Multi-Agent Conversations"
+sidebarTitle: "Demo UI"
+description: "Run the A2A Mesop demo locally or as a container to explore multi-agent chat, dynamic agent registration, task inspection, and rich content rendering."
+---
+
+The A2A demo web app is a full-stack browser interface that lets you experience the Agent2Agent protocol in action. Built on [Mesop](https://github.com/mesop-dev/mesop) and powered by a Google ADK Host Agent, the app connects to any number of remote A2A-compliant agents, routes user messages through the host orchestrator, and renders the full exchange — including streamed text, thought bubbles, interactive forms, and images — in a conversational UI.
+
+## Architecture
+
+The demo has three distinct layers that communicate over the A2A protocol.
+
+<CardGroup cols={3}>
+  <Card title="Mesop Frontend" icon="browser">
+    A Python-native reactive web framework. Serves the chat view, agent list, event log, and task explorer on port **12000**. State is managed by `AppState` and pages are mounted via FastAPI's WSGI bridge.
+  </Card>
+  <Card title="Host Agent (Google ADK)" icon="robot">
+    A Google ADK `Runner` that orchestrates user requests. `ADKHostManager` wraps the runner and implements `ApplicationManager`, providing conversations, tasks, events, and message routing for the Mesop UI.
+  </Card>
+  <Card title="Remote A2A Agents" icon="plug">
+    Any server that speaks A2A. The host fetches each remote agent's AgentCard and wraps it in an `A2AClient`. Agents are registered at runtime — no restart required.
+  </Card>
+</CardGroup>
+
+The `main.py` entry point wires everything together: it starts `ConversationServer` inside a FastAPI lifespan context, mounts the Mesop WSGI application at `/`, and exposes the host and UI on the same port.
+
+```python main.py (startup)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    httpx_client_wrapper.start()
+    ConversationServer(app, httpx_client_wrapper())
+    app.openapi_schema = None
+    app.mount(
+        '/',
+        WSGIMiddleware(
+            me.create_wsgi_app(
+                debug_mode=os.environ.get('DEBUG_MODE', '') == 'true'
+            )
+        ),
+    )
+    app.setup()
+    yield
+    await httpx_client_wrapper.stop()
+```
+
+### Pages
+
+| Route | Title | Purpose |
+|---|---|---|
+| `/` | Chat | Home page with conversation list |
+| `/agents` | Agents | Register and view remote agents |
+| `/conversation` | Conversation | Active chat with the Host Agent |
+| `/event_list` | Event List | Full log of all A2A protocol events |
+| `/task_list` | Task List | All remote-agent task updates |
+| `/settings` | Settings | API key and theme configuration |
+
+## Features
+
+<AccordionGroup>
+  <Accordion title="Dynamically add remote agents" icon="plus">
+    Click the robot icon in the navigation bar and enter the base URL of any running A2A agent (e.g. `localhost:10002`). The app fetches the AgentCard from `/.well-known/agent.json`, registers the agent with the Host Agent, and immediately makes it available to conversations — without restarting the server.
+
+    Internally, `ADKHostManager.register_agent` calls `get_agent_card(url)`, appends the card to the host's agent list, and re-initialises the ADK runner:
+
+    ```python adk_host_manager.py
+    def register_agent(self, url):
+        agent_data = get_agent_card(url)
+        if not agent_data.url:
+            agent_data.url = url
+        self._agents.append(agent_data)
+        self._host_agent.register_agent_card(agent_data)
+        # Now update the host agent definition
+        self._initialize_host()
+    ```
+  </Accordion>
+
+  <Accordion title="Multi-agent conversations" icon="comments">
+    Messages sent from the chat view flow to the Host Agent's ADK runner. The host orchestrates one or more remote agents transparently, streaming intermediate events back to the UI. Each agent response — including complex payloads — is stored in the conversation's message history and rendered in real time.
+  </Accordion>
+
+  <Accordion title="A2A task explorer" icon="list-check">
+    The **Event List** page shows every message exchanged between the frontend, the Host Agent, and all remote agents, with actor name and timestamp. The **Task List** page surfaces every `TaskStatusUpdateEvent` and `TaskArtifactUpdateEvent` emitted by remote agents, letting you trace the full task lifecycle.
+  </Accordion>
+
+  <Accordion title="Rich content rendering" icon="image">
+    The Mesop frontend renders four content types out of the box:
+    - **Text** — streamed plain prose from any agent
+    - **Thought bubbles** — internal reasoning steps surfaced from ADK events
+    - **Web forms** — `DataPart` payloads interpreted as interactive input requests
+    - **Images** — `FilePart` content rendered inline in the conversation view
+  </Accordion>
+
+  <Accordion title="Flexible authentication" icon="key">
+    On load, `main.py` inspects the environment. If `GOOGLE_GENAI_USE_VERTEXAI=TRUE` is set, Vertex AI is used. If `GOOGLE_API_KEY` is set, Google AI Studio is used. Otherwise, a modal dialog prompts for an API key, which `ADKHostManager.update_api_key` applies without a server restart.
+  </Accordion>
+</AccordionGroup>
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Python 3.12+" icon="python">
+    Required by the `pyproject.toml`. The Containerfile also uses `ubi8/python-312`.
+  </Card>
+  <Card title="uv" icon="bolt">
+    The project uses `uv` for dependency management and running the application.
+  </Card>
+  <Card title="A2A agent servers" icon="server">
+    At least one running A2A-compliant agent to connect to (e.g. any of the Python sample agents under `samples/python/agents/`).
+  </Card>
+  <Card title="Google API credentials" icon="shield-check">
+    Either a Google AI Studio API key (`GOOGLE_API_KEY`) or a Google Cloud project with Vertex AI enabled (`GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`).
+  </Card>
+</CardGroup>
+
+## Running Locally
+
+<Steps>
+  <Step title="Navigate to the demo UI directory">
+    From the repository root, change into the demo UI directory:
+
+    ```bash
+    cd demo/ui
+    ```
+  </Step>
+
+  <Step title="Configure authentication credentials">
+    Create a `.env` file in `demo/ui` with your credentials. Choose **one** of the two options below.
+
+    <Tabs>
+      <Tab title="Option A — Google AI Studio">
+        ```bash
+        echo "GOOGLE_API_KEY=your_api_key_here" >> .env
+        ```
+
+        <Tip>
+          You can skip this step and enter the key directly in the UI dialog that appears on first load.
+        </Tip>
+      </Tab>
+      <Tab title="Option B — Vertex AI">
+        ```bash
+        echo "GOOGLE_GENAI_USE_VERTEXAI=TRUE" >> .env
+        echo "GOOGLE_CLOUD_PROJECT=your_project_id" >> .env
+        echo "GOOGLE_CLOUD_LOCATION=your_location" >> .env
+        ```
+
+        <Note>
+          Authenticate with Google Cloud first: `gcloud auth login`. See the [ADK quickstart](https://google.github.io/adk-docs/get-started/quickstart/#set-up-the-model) for full setup instructions.
+        </Note>
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Start the demo UI">
+    ```bash
+    uv run main.py
+    ```
+
+    The application binds to `0.0.0.0:12000` by default. Open [http://localhost:12000](http://localhost:12000) in your browser.
+
+    <Info>
+      Override the host and port with the environment variables `A2A_UI_HOST` and `A2A_UI_PORT`.
+    </Info>
+  </Step>
+
+  <Step title="Start a remote sample agent">
+    In a separate terminal, launch one of the Python sample agents. The expense reimbursement agent is a good starting point:
+
+    ```bash
+    cd samples/python/agents/adk_expense_reimbursement/
+    cp ../../../../demo/ui/.env ./
+    uv run .
+    ```
+
+    The agent will start and listen on port `10002` by default.
+  </Step>
+
+  <Step title="Register the agent in the UI">
+    In the running demo UI, open the **Remote Agents** tab and add the agent's address:
+
+    ```
+    localhost:10002
+    ```
+
+    The UI fetches the agent's AgentCard and registers it with the Host Agent immediately.
+  </Step>
+
+  <Step title="Start a conversation">
+    Switch to the **Chat** view and try a multi-step request:
+
+    > *"Reimburse lunch for 20 EUR but it needs to be converted to USD ahead of time."*
+
+    Open the **Event List** and **Task List** tabs to inspect the full A2A exchange as it happens.
+  </Step>
+</Steps>
+
+## Building and Running as a Container
+
+The demo ships with a `Containerfile` that uses Red Hat UBI 8 with Python 3.12. The build context must be the `samples/python` directory so that shared workspace dependencies are available.
+
+<Steps>
+  <Step title="Navigate to the samples/python directory">
+    ```bash
+    cd samples/python
+    ```
+  </Step>
+
+  <Step title="Build the container image">
+    ```bash
+    podman build -f demo/ui/Containerfile . -t a2a-ui
+    ```
+
+    <Tip>
+      `podman` is a drop-in replacement for `docker`. Either tool works with these commands.
+    </Tip>
+
+    The `Containerfile` installs system build dependencies (`gcc`, `gcc-c++`), installs `uv`, then runs `uv sync --frozen --no-dev` to reproduce the locked dependency set:
+
+    ```dockerfile demo/ui/Containerfile
+    FROM registry.access.redhat.com/ubi8/python-312
+
+    WORKDIR /opt/app-root/demo/ui
+
+    COPY ../.. /opt/app-root
+
+    USER root
+
+    RUN dnf -y update && dnf install -y gcc gcc-c++ \
+     && pip install uv
+
+    ENV UV_COMPILE_BYTECODE=1 \
+        UV_LINK_MODE=copy
+
+    RUN --mount=type=cache,target=/.cache/uv \
+        uv sync --frozen --no-install-project --no-dev
+
+    RUN --mount=type=cache,target=/.cache/uv \
+        uv sync --frozen --no-dev
+
+    RUN chgrp -R root /opt/app-root/ && chmod -R g+rwx /opt/app-root/
+
+    EXPOSE 12000
+
+    USER 1001
+
+    CMD ["uv", "run", "main.py", "--host", "0.0.0.0"]
+    ```
+  </Step>
+
+  <Step title="Run the container">
+    ```bash
+    podman run -p 12000:12000 --network host a2a-ui
+    ```
+
+    <Warning>
+      Using `--network host` is not recommended in production. It is included here for development convenience so the container can reach locally running A2A agent servers.
+    </Warning>
+  </Step>
+</Steps>
+
+## Key Dependencies
+
+The `pyproject.toml` for the demo UI declares the following primary dependencies:
+
+| Package | Role |
+|---|---|
+| `mesop>=1.0.0` | Reactive Python web framework for the UI |
+| `fastapi>=0.115.0` | ASGI host that bridges Mesop and the conversation server |
+| `uvicorn>=0.34.0` | ASGI server |
+| `google-adk[a2a]>=1.7.0` | Host Agent runner and ADK integrations |
+| `a2a-sdk>=0.3.0` | A2A protocol types and client |
+| `httpx>=0.28.1` | Async HTTP client for A2A requests |
+| `google-genai>=1.9.0` | Gemini model access |

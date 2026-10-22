@@ -1,0 +1,354 @@
+---
+title: "Multi-Agent Host: Orchestrating Remote A2A Agents"
+sidebarTitle: "Multi-Agent Host"
+description: "The multi-agent host pairs a Google ADK orchestrating agent with typed RemoteAgentConnections to discover, register, and route tasks across multiple A2A servers at runtime."
+---
+
+The A2A multi-agent host demonstrates how to build an orchestrating application that delegates tasks across multiple remote A2A servers. Rather than hard-coding a single endpoint, the host maintains a registry of `RemoteAgentConnections` — one per remote agent — and uses a Google ADK-powered `HostAgent` to decide which connection to invoke for any given user request. The host itself is also a full A2A server, meaning downstream clients (such as the CLI host or the Demo Web UI) communicate with it using the same A2A protocol it uses to reach its remote agents. Source code lives in `samples/python/hosts/multiagent/` and `samples/python/hosts/a2a_multiagent_host/`.
+
+## Architecture
+
+```text
+CLI Host / Demo Web UI
+        │  A2A (JSON-RPC)
+        ▼
+┌──────────────────────────────────────────┐
+│              Host A2A Server             │
+│  (A2AStarletteApplication, port 8083)    │
+│                                          │
+│  HostAgentExecutor                       │
+│    └── ADK Runner                        │
+│          └── HostAgent / RoutingAgent    │
+│                ├── list_remote_agents()  │
+│                └── send_message()        │
+│                      │                  │
+│  RemoteAgentConnections registry         │
+│    ├── [Agent Name A] → A2AClient ──────►│  Remote A2A Server A
+│    ├── [Agent Name B] → A2AClient ──────►│  Remote A2A Server B
+│    └── [Agent Name C] → A2AClient ──────►│  Remote A2A Server C
+└──────────────────────────────────────────┘
+```
+
+The `HostAgentExecutor` (an `AgentExecutor` implementation) wraps an ADK `Runner`. When a request arrives, the executor creates or retrieves a session, runs the ADK agent asynchronously, and translates ADK events back into A2A `TaskState` updates. The ADK agent is equipped with two tools — `list_remote_agents` and `send_message` — that let the LLM discover registered agents and dispatch tasks to them.
+
+## Key Components
+
+### `RemoteAgentConnections`
+
+`RemoteAgentConnections` (`multiagent/remote_agent_connection.py`) is a typed wrapper around `A2AClient`. It stores the resolved `AgentCard`, creates the client via `ClientFactory`, and provides a single `send_message` coroutine that iterates over streaming events and returns the first terminal `Task` or `Message`:
+
+```python
+class RemoteAgentConnections:
+    """A class to hold the connections to the remote agents."""
+
+    def __init__(self, client_factory: ClientFactory, agent_card: AgentCard):
+        self.agent_client: Client = client_factory.create(agent_card)
+        self.card: AgentCard = agent_card
+        self.pending_tasks = set()
+
+    def get_agent(self) -> AgentCard:
+        return self.card
+
+    async def send_message(self, message: Message) -> Task | Message | None:
+        lastTask: Task | None = None
+        try:
+            async for event in self.agent_client.send_message(message):
+                if isinstance(event, Message):
+                    return event
+                if self.is_terminal_or_interrupted(event[0]):
+                    return event[0]
+                lastTask = event[0]
+        except Exception as e:
+            print('Exception found in send_message')
+            traceback.print_exc()
+            raise e
+        return lastTask
+
+    def is_terminal_or_interrupted(self, task: Task) -> bool:
+        return task.status.state in [
+            TaskState.completed,
+            TaskState.canceled,
+            TaskState.failed,
+            TaskState.input_required,
+            TaskState.unknown,
+        ]
+```
+
+### `HostAgent` — Discovery and Routing
+
+`HostAgent` (`multiagent/host_agent.py`) initialises connections to all configured remote agents by resolving their `AgentCard`s concurrently at startup. Once registered, the cards are serialised into the LLM's system prompt so the model knows which agents exist and what they do:
+
+```python
+async def init_remote_agent_addresses(
+    self, remote_agent_addresses: list[str]
+) -> None:
+    """Resolve and register agent cards for each remote agent address."""
+    async with asyncio.TaskGroup() as task_group:
+        for address in remote_agent_addresses:
+            task_group.create_task(self.retrieve_card(address))
+
+async def retrieve_card(self, address: str) -> None:
+    """Fetch an agent card from `address` and register it."""
+    card_resolver = A2ACardResolver(self.httpx_client, address)
+    card = await card_resolver.get_agent_card()
+    self.register_agent_card(card)
+
+def register_agent_card(self, card: AgentCard) -> None:
+    """Register a remote agent card for delegation."""
+    remote_connection = RemoteAgentConnections(self.client_factory, card)
+    self.remote_agent_connections[card.name] = remote_connection
+    self.cards[card.name] = card
+    agent_info = [json.dumps(ra) for ra in self.list_remote_agents()]
+    self.agents = '\n'.join(agent_info)
+```
+
+`register_agent_card` also updates the `self.agents` string that is injected into the LLM instruction at every turn, so any agent added after startup is immediately visible to the model.
+
+### ADK Agent with Routing Tools
+
+The `HostAgent` exposes two ADK tools to the underlying LLM:
+
+```python
+def create_agent(self) -> Agent:
+    """Build the underlying ADK agent for the host."""
+    litellm_model = os.getenv(
+        'LITELLM_MODEL', 'gemini/gemini-2.0-flash-001'
+    )
+    return Agent(
+        model=LiteLlm(model=litellm_model),
+        name='host_agent',
+        instruction=self.root_instruction,
+        before_model_callback=self.before_model_callback,
+        description=(
+            'This agent orchestrates the decomposition of the user request into'
+            ' tasks that can be performed by the child agents.'
+        ),
+        tools=[
+            self.list_remote_agents,
+            self.send_message,
+        ],
+    )
+```
+
+- **`list_remote_agents()`** — returns `[{"name": "...", "description": "..."}]` for all registered connections.
+- **`send_message(agent_name, message, tool_context)`** — looks up the named connection, constructs a full A2A `Message`, calls `RemoteAgentConnections.send_message()`, and handles `input_required` / `canceled` / `failed` task states.
+
+### `HostAgentExecutor` — Bridging ADK and A2A
+
+`HostAgentExecutor` (`a2a_multiagent_host/host_agent_executor.py`) implements the `AgentExecutor` interface required by the A2A Python SDK. It translates incoming A2A `RequestContext` objects into ADK `UserContent`, runs the ADK session, and emits `TaskState` updates via `TaskUpdater`:
+
+```python
+async def execute(
+    self,
+    context: RequestContext,
+    event_queue: EventQueue,
+    response_trace: ResponseTrace = None,
+):
+    if TRACEABILITY_EXTENSION_URI in context.requested_extensions:
+        context.add_activated_extension(TRACEABILITY_EXTENSION_URI)
+        response_trace = ResponseTrace()
+
+    updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+    if not context.current_task:
+        await updater.update_status(TaskState.submitted)
+    await updater.update_status(TaskState.working)
+    await self._process_request(
+        types.UserContent(
+            parts=[
+                convert_a2a_part_to_genai(part)
+                for part in context.message.parts
+            ],
+        ),
+        context.context_id,
+        updater,
+        response_trace=response_trace,
+    )
+```
+
+The executor also checks for the traceability extension URI in `context.requested_extensions` and, if present, activates it and builds a `ResponseTrace` that is appended as an artifact to the final response.
+
+## Setting Up the Multi-Agent Host
+
+<Steps>
+  <Step title="Configure environment variables">
+    Copy the example environment file and fill in your values:
+
+    ```bash
+    cd samples/python/hosts/a2a_multiagent_host
+    cp example.env .env
+    ```
+
+    Edit `.env`:
+
+    ```bash
+    # Option A — Google AI Studio
+    GOOGLE_API_KEY="your_api_key_here"
+
+    # Option B — Vertex AI
+    GOOGLE_GENAI_USE_VERTEXAI=TRUE
+    GOOGLE_CLOUD_PROJECT="your-project-id"
+    GOOGLE_CLOUD_LOCATION=global
+
+    # Addresses of remote agents this host will route to
+    AIR_AGENT_URL=http://localhost:10002
+    WEA_AGENT_URL=http://localhost:10001
+    ```
+  </Step>
+
+  <Step title="Start the remote agent servers">
+    <CodeGroup>
+      ```bash Weather Agent
+      cd samples/python/agents/airbnb_planner_multiagent/weather_agent
+      uv run .
+      # Starts on port 10001
+      ```
+
+      ```bash Airbnb Agent
+      cd samples/python/agents/airbnb_planner_multiagent/airbnb_agent
+      uv run .
+      # Starts on port 10002
+      ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Start the host A2A server">
+    ```bash
+    cd samples/python/hosts/a2a_multiagent_host
+    uv run .
+    # Starts on port 8083
+    ```
+
+    On startup, the host resolves `AgentCard`s from `AIR_AGENT_URL` and `WEA_AGENT_URL`, registers both connections, and begins serving A2A requests.
+  </Step>
+
+  <Step title="Connect a client">
+    <Tabs>
+      <Tab title="CLI Host">
+        ```bash
+        cd samples/python/hosts/cli
+        uv run . --agent http://localhost:8083
+        ```
+
+        Example queries:
+        - `Tell me about weather in LA, CA`
+        - `Please find a room in LA, CA, June 20-25, 2025, two adults`
+      </Tab>
+      <Tab title="Demo Web UI">
+        ```bash
+        cd demo/ui
+        uv run main.py
+        # Opens on http://localhost:12000
+        ```
+
+        Navigate to the **Remote Agents** tab and add `localhost:8083` to register the host agent in the web interface.
+      </Tab>
+    </Tabs>
+  </Step>
+</Steps>
+
+## Adding Agents Dynamically
+
+The `register_agent_card` method can be called at any point after startup. In the Demo Web UI, clicking the **robot icon** opens an input field where you can paste any remote agent's base URL. The UI calls `register_agent_card` with the freshly resolved card, and the host agent's instruction prompt is immediately updated with the new agent's name and description — no restart required:
+
+```python
+def register_agent_card(self, card: AgentCard) -> None:
+    """Register a remote agent card for delegation."""
+    remote_connection = RemoteAgentConnections(self.client_factory, card)
+    self.remote_agent_connections[card.name] = remote_connection
+    self.cards[card.name] = card
+    # Rebuild the agents string so the next LLM call sees the new agent.
+    agent_info = [json.dumps(ra) for ra in self.list_remote_agents()]
+    self.agents = '\n'.join(agent_info)
+```
+
+## The Demo Web UI
+
+The Demo Web UI (`demo/ui/`) is a [Mesop](https://github.com/mesop-dev/mesop)-based frontend that uses the same `HostAgent` / `RemoteAgentConnections` backend described above.
+
+<CardGroup cols={2}>
+  <Card title="Conversation View" icon="comments">
+    Renders text, thought bubbles, web-form input requests, and image artifacts returned by any remote agent in a single threaded conversation.
+  </Card>
+  <Card title="Task Explorer" icon="list-check">
+    A dedicated tab shows all `TaskStatusUpdateEvent` and `TaskArtifactUpdateEvent` entries for every in-flight and completed task, including full message history.
+  </Card>
+  <Card title="Agent Card Browser" icon="id-card">
+    Inspect the raw `AgentCard` JSON for each registered remote agent to verify capabilities, skills, and extension support.
+  </Card>
+  <Card title="Dynamic Agent Registration" icon="plus">
+    Add any A2A-compliant server at runtime by entering its URL in the UI. The `HostAgent` fetches the card and begins routing eligible requests to it immediately.
+  </Card>
+</CardGroup>
+
+### Running the Demo UI
+
+```bash
+cd demo/ui
+
+# Google AI Studio
+echo "GOOGLE_API_KEY=your_api_key_here" >> .env
+
+# — or — Vertex AI
+echo "GOOGLE_GENAI_USE_VERTEXAI=TRUE" >> .env
+echo "GOOGLE_CLOUD_PROJECT=your_project_id" >> .env
+echo "GOOGLE_CLOUD_LOCATION=your_location" >> .env
+
+uv run main.py
+# http://localhost:12000
+```
+
+<Tip>
+  You can run the Demo UI as a container image using Podman or Docker. Build from `samples/python/` with `podman build -f demo/ui/Containerfile . -t a2a-ui` and run with `podman run -p 12000:12000 --network host a2a-ui`.
+</Tip>
+
+## Task State Lifecycle
+
+The multi-agent host propagates A2A task states through the full lifecycle. The `HostAgentExecutor` emits `submitted` and `working` states immediately on receipt, then emits `completed` (with any artifacts) once the ADK runner produces a final response:
+
+```python
+async def _process_request(self, new_message, session_id, task_updater, response_trace=None):
+    ...
+    async for event in self.runner.run_async(
+        user_id=DEFAULT_USER_ID,
+        session_id=session_id,
+        new_message=new_message,
+    ):
+        if event.is_final_response():
+            parts = [
+                convert_genai_part_to_a2a(part)
+                for part in event.content.parts
+                if (part.text or part.file_data or part.inline_data)
+            ]
+            await task_updater.add_artifact(parts)
+            await task_updater.update_status(TaskState.completed, final=True)
+            break
+        if not event.get_function_calls():
+            await task_updater.update_status(
+                TaskState.working,
+                message=task_updater.new_agent_message([...]),
+            )
+```
+
+Intermediate `working` status updates (with partial message content) are emitted for every non-function-call ADK event, giving streaming clients a live view of the host agent's reasoning progress.
+
+## Traceability Extension
+
+The `a2a_multiagent_host` variant ships with a traceability extension that records which remote agents were called, what queries were sent, and how many tokens were consumed at each step. When a client sends the `X-A2A-Extensions` header containing the traceability extension URI, the host activates it and appends the full trace as an additional `TextPart` artifact in the response:
+
+```python
+if TRACEABILITY_EXTENSION_URI in context.requested_extensions:
+    context.add_activated_extension(TRACEABILITY_EXTENSION_URI)
+    response_trace = ResponseTrace()
+```
+
+Enable it from the CLI host with:
+
+```bash
+uv run . \
+  --agent http://localhost:8083 \
+  --enabled_extensions "https://example.com/traceability/v1"
+```
+
+<Warning>
+  All data received from remote agents — including AgentCard fields such as `name`, `description`, and `skills.description` — must be sanitised before being injected into LLM prompts. The multi-agent host passes card descriptions directly into the system instruction; in a production deployment you must validate this content to prevent prompt-injection attacks.
+</Warning>

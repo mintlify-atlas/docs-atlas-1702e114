@@ -1,0 +1,108 @@
+---
+title: "A2A Protocol Extensions: Capabilities & Mechanisms"
+sidebarTitle: "Overview"
+description: "A2A extensions add optional capabilities to the base protocol. Learn how agents declare, activate, and implement extensions via AgentCards and headers."
+---
+
+A2A extensions are optional, versioned capability modules that enrich the base Agent2Agent protocol without breaking backward compatibility. Each extension is identified by a stable URI, declared by agents in their `AgentCard`, and activated by clients on a per-request basis through a standard HTTP header. This page explains the extension mechanism and provides a reference to every documented extension.
+
+## How Extensions Work
+
+Extensions follow a two-phase lifecycle: **declaration** by the server (agent) and **activation** by the client.
+
+### Declaring Support in AgentCard
+
+An agent that supports one or more extensions lists them inside the `extensions` array of its `AgentCapabilities` object. Each entry must include the extension `uri` and may include a `params` object with extension-specific configuration.
+
+```json
+{
+  "capabilities": {
+    "extensions": [
+      {
+        "uri": "https://github.com/a2aproject/a2a-samples/extensions/timestamp/v1",
+        "description": "Adds RFC 3339 UTC timestamps to messages and artifacts."
+      },
+      {
+        "uri": "https://github.com/a2aproject/a2a-samples/extensions/traceability/v1",
+        "description": "Returns a ResponseTrace alongside task results."
+      }
+    ]
+  }
+}
+```
+
+Agents MUST only list extensions they are prepared to honour. Clients that discover an extension URI they do not recognise MUST ignore it safely.
+
+### Activating an Extension per Request
+
+Clients signal which extensions they want the server to activate for a specific call by including the `X-A2A-Extensions` HTTP header. The header value is a comma-separated list of extension URIs.
+
+```http
+POST /tasks/send HTTP/1.1
+Host: agent.example.com
+Content-Type: application/json
+X-A2A-Extensions: https://github.com/a2aproject/a2a-samples/extensions/timestamp/v1,
+                  https://github.com/a2aproject/a2a-samples/extensions/traceability/v1
+```
+
+For gRPC transports the same URIs are passed as the `X-A2A-Extensions` metadata value. Servers MUST ignore activation of extensions they have not declared, and MUST NOT return extension data that was not requested.
+
+### Extension URI Format
+
+All A2A extension URIs share a common structure:
+
+```text
+https://github.com/a2aproject/a2a-samples/<path-to-extension>
+```
+
+The URI acts as both the human-readable specification pointer and the machine-readable key used in metadata maps when the extension embeds data in messages or artifacts.
+
+<Note>
+  A client that activates an extension the server has not declared in its `AgentCard` may receive unexpected or missing data. Always inspect the `AgentCard` before requesting extensions.
+</Note>
+
+## Documented Extensions
+
+<CardGroup cols={2}>
+  <Card
+    title="Agent Gateway Protocol (AGP)"
+    icon="network-wired"
+    href="/extensions/agp"
+  >
+    Introduces hierarchical routing over the flat A2A mesh via Autonomous Squads, policy-based capability announcements, and a BGP-inspired routing table.
+  </Card>
+  <Card
+    title="Secure Passport"
+    icon="passport"
+    href="/extensions/secure-passport"
+  >
+    Enables a calling agent to attach a signed, verifiable `CallerContext` to any message, transforming anonymous calls into trusted, context-aware partnerships.
+  </Card>
+  <Card
+    title="Timestamp"
+    icon="clock"
+    href="/extensions/timestamp"
+  >
+    Adds RFC 3339 UTC creation timestamps to `Message` and `Artifact` metadata so downstream consumers can reason about message ordering and freshness.
+  </Card>
+  <Card
+    title="Traceability"
+    icon="magnifying-glass-chart"
+    href="/extensions/traceability"
+  >
+    Returns a structured `ResponseTrace` — a tree of `Step` records covering every tool call and sub-agent invocation — alongside task results for observability.
+  </Card>
+</CardGroup>
+
+## Extension Compatibility Summary
+
+| Extension | Transport Activation | Data Location | Version |
+|---|---|---|---|
+| AGP | AgentCard declaration | Intent/Capability message body | 1.0.0 |
+| Secure Passport | AgentCard + metadata key | `message.metadata` | 1.0.0 |
+| Timestamp | `X-A2A-Extensions` header | `message.metadata` / `artifact.metadata` | v1 |
+| Traceability | `X-A2A-Extensions` header | `message.metadata` or artifact | v1 |
+
+<Tip>
+  The Python SDK includes ready-made helpers for Timestamp (`TimestampExtension`) and Traceability (`TraceabilityExtension`) in `samples/python/extensions/`. These classes handle header injection, metadata stamping, and server-side event wrapping automatically.
+</Tip>

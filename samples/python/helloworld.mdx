@@ -1,0 +1,387 @@
+---
+title: "Hello World Agent: A2A Python SDK Walkthrough"
+sidebarTitle: "Hello World"
+description: "Build your first A2A-compliant agent with Python. This page walks through every file in the helloworld sample — server setup, AgentCard, AgentExecutor, and the test client."
+---
+
+The A2A **Hello World** agent is the simplest possible demonstration of the Agent-to-Agent protocol in Python. It registers an `AgentCard`, exposes a JSON-RPC endpoint over HTTP with Starlette and Uvicorn, and responds to any text message with `"Hello, World! I have received your request (…)"`. Working through this sample teaches you every structural layer you will reuse in every A2A agent you build afterwards.
+
+## Project layout
+
+```text
+samples/python/agents/helloworld/
+├── __main__.py        # Server entry-point: AgentCard, routes, Starlette app
+├── agent_executor.py  # HelloWorldAgent + HelloWorldAgentExecutor
+├── test_client.py     # Async client: card discovery, send, stream, extended card
+└── requirements.txt   # Python dependencies
+```
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Python 3.10+" icon="python">
+    The A2A Python SDK requires Python 3.10 or higher.
+  </Card>
+  <Card title="a2a-sdk" icon="package">
+    Install from `requirements.txt` — includes the SDK, Starlette, and Uvicorn.
+  </Card>
+</CardGroup>
+
+## Quick start
+
+<Steps>
+  <Step title="Create a virtual environment">
+    ```bash
+    cd samples/python/agents/helloworld
+    python -m venv .venv
+    source .venv/bin/activate
+    pip install -r requirements.txt
+    ```
+  </Step>
+  <Step title="Start the agent server">
+    ```bash
+    python __main__.py
+    ```
+    The server listens on `http://127.0.0.1:9999`.
+  </Step>
+  <Step title="Run the test client">
+    Open a second terminal with the same virtual environment activated:
+    ```bash
+    python test_client.py
+    ```
+  </Step>
+</Steps>
+
+## `__main__.py` — server entry-point
+
+This file wires together every A2A server primitive: skills, agent cards, the request handler, routes, and the ASGI app.
+
+### Defining a skill
+
+An `AgentSkill` describes one callable capability the agent exposes to clients. Clients use the skill list in the `AgentCard` to understand what they can ask.
+
+```python
+skill = AgentSkill(
+    id='echo_bot',
+    name='Echo Bot',
+    description='An example agent that acknowledges client request and responds with a "Hello World" message.',
+    input_modes=['text/plain'],
+    output_modes=['text/plain'],
+    tags=['a2a', 'echo-example'],
+    examples=['hi', 'how are you'],
+)
+```
+
+A second, non-public skill is also defined for authenticated users only:
+
+```python
+extended_skill = AgentSkill(
+    id='echo_bot_super_mode',
+    name='Echo Bot (Super Mode)',
+    description='An extended version of Echo Bot that responds with extra enthusiasm!',
+    tags=['a2a', 'echo-example', 'extended'],
+    examples=['super hi', 'give me a super hello'],
+)
+```
+
+### Defining the public AgentCard
+
+The `AgentCard` is the agent's self-description, served at `/.well-known/agent.json` so clients can discover it without any prior knowledge of the agent's capabilities.
+
+```python
+public_agent_card = AgentCard(
+    name='Hello World Agent',
+    description='Just a hello world agent',
+    version='0.0.1',
+    default_input_modes=['text/plain'],
+    default_output_modes=['text/plain'],
+    capabilities=AgentCapabilities(streaming=True, extended_agent_card=True),
+    supported_interfaces=[
+        AgentInterface(
+            protocol_binding='JSONRPC',
+            url='http://127.0.0.1:9999',
+            protocol_version='1.0',
+        )
+    ],
+    skills=[skill],
+)
+```
+
+<Note>
+  The `extended_agent_card=True` capability flag tells clients that this agent
+  can return a richer card — with additional skills — when the client
+  authenticates.
+</Note>
+
+### Extended AgentCard for authenticated users
+
+```python
+extended_agent_card = AgentCard(
+    name='Hello World Agent - Extended Edition',
+    description='The full-featured hello world agent for authenticated users.',
+    version='0.0.2',
+    default_input_modes=['text/plain'],
+    default_output_modes=['text/plain'],
+    capabilities=AgentCapabilities(streaming=True, extended_agent_card=True),
+    supported_interfaces=[
+        AgentInterface(
+            protocol_binding='JSONRPC',
+            url='http://127.0.0.1:9999',
+            protocol_version='1.0',
+        )
+    ],
+    skills=[skill, extended_skill],
+)
+```
+
+### Wiring the request handler and routes
+
+`DefaultRequestHandler` connects the `AgentExecutor` with the in-memory task store and both agent cards:
+
+```python
+request_handler = DefaultRequestHandler(
+    agent_executor=HelloWorldAgentExecutor(),
+    task_store=InMemoryTaskStore(),
+    agent_card=public_agent_card,
+    extended_agent_card=extended_agent_card,
+)
+```
+
+Routes are split into two groups — one for serving the card itself, and one for all JSON-RPC traffic:
+
+```python
+routes = []
+routes.extend(create_agent_card_routes(public_agent_card))
+routes.extend(create_jsonrpc_routes(request_handler, '/'))
+```
+
+### Starting the ASGI server
+
+```python
+app = Starlette(routes=routes)
+uvicorn.run(app, host='127.0.0.1', port=9999)
+```
+
+<Tip>
+  You can swap Starlette for FastAPI, or Uvicorn for any other ASGI server,
+  without changing any A2A logic.
+</Tip>
+
+## `agent_executor.py` — task execution
+
+This file contains two classes: the inner `HelloWorldAgent` (pure business logic) and `HelloWorldAgentExecutor` (the A2A adapter).
+
+### HelloWorldAgent
+
+The core agent has no A2A knowledge at all — it simply returns a greeting string:
+
+```python
+class HelloWorldAgent:
+    """Hello World Agent."""
+
+    async def invoke(self, user_request: str) -> str:
+        """Invoke the Hello World agent to generate a response."""
+        return f'Hello, World! I have received your request ({user_request})'
+```
+
+### HelloWorldAgentExecutor — execute
+
+`execute` is called for every `message/send` or `message/stream` request. It follows a five-step pattern that every A2A executor reuses:
+
+```python
+class HelloWorldAgentExecutor(AgentExecutor):
+    """Test AgentProxy Implementation."""
+
+    def __init__(self) -> None:
+        self.agent = HelloWorldAgent()
+
+    async def execute(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
+        """Process user request."""
+        # 1. Collect a task from request context
+        if context.current_task:
+            task = context.current_task
+        else:
+            # 1.1 If there is no task, create one and add it to the event queue
+            task = new_task_from_user_message(context.message)
+            await event_queue.enqueue_event(task)
+
+        # 2. Update task status in EventQueue using TaskUpdater
+        task_updater = TaskUpdater(
+            event_queue=event_queue, task_id=task.id, context_id=task.context_id
+        )
+        await task_updater.update_status(
+            state=TaskState.TASK_STATE_WORKING,
+            message=new_text_message('Processing request...'),
+        )
+
+        # 3. Collect user request and invoke the agent
+        query = get_message_text(context.message)
+        if query:
+            result = await self.agent.invoke(user_request=query)
+        else:
+            result = 'No text input is provided!'
+
+        # 4. Add the generated response as an artifact
+        await task_updater.add_artifact(parts=[new_text_part(text=result, media_type='text/plain')])
+
+        # 5. Mark task completed
+        await task_updater.update_status(
+            state=TaskState.TASK_STATE_COMPLETED,
+            message=new_text_message('Request is completed!'),
+        )
+```
+
+<Info>
+  **Task state flow:** `submitted` → `working` → `completed`. The `event_queue`
+  carries every state transition to the client, enabling both streaming and
+  non-streaming responses from the same code path.
+</Info>
+
+### HelloWorldAgentExecutor — cancel
+
+Cancellation is not implemented in this minimal sample; the method raises `NotImplementedError` to make that explicit:
+
+```python
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+        """Raise exception as cancel is not supported."""
+        raise NotImplementedError('Cancel is not supported.')
+```
+
+## `test_client.py` — interacting with the agent
+
+The test client demonstrates four operations: fetching the public card, sending a non-streaming message, sending a streaming message, and fetching the extended card.
+
+### Resolving the AgentCard
+
+```python
+import httpx
+from a2a.client import A2ACardResolver
+
+async with httpx.AsyncClient() as httpx_client:
+    resolver = A2ACardResolver(
+        httpx_client=httpx_client,
+        base_url='http://127.0.0.1:9999',
+    )
+    public_agent_card = await resolver.get_agent_card()
+```
+
+### Non-streaming message
+
+```python
+from a2a.client import ClientConfig, create_client
+from a2a.helpers import new_text_message
+from a2a.types import Role, SendMessageRequest
+
+config = ClientConfig(streaming=False)
+client = await create_client(agent=public_agent_card, client_config=config)
+
+message = new_text_message('Hi there', role=Role.ROLE_USER)
+request = SendMessageRequest(message=message)
+
+async for chunk in client.send_message(request):
+    print(chunk)
+
+await client.close()
+```
+
+### Streaming message
+
+```python
+client_config = ClientConfig(streaming=True)
+client = await create_client(agent=public_agent_card, client_config=client_config)
+
+async for chunk in client.send_message(request):
+    print(chunk)
+
+await client.close()
+```
+
+### Running the full test suite
+
+The pytest fixture `start_server` launches the server as a subprocess before the tests run:
+
+```bash
+pytest test_client.py -v
+```
+
+## Expected output
+
+After running `python test_client.py`, you will see output similar to the following:
+
+```text
+Successfully fetched the public agent card:
+====================================================
+                    AgentCard
+====================================================
+--- General ---
+Name        : Hello World Agent
+Description : Just a hello world agent
+Version     : 0.0.1
+
+--- Interfaces ---
+  [0] http://127.0.0.1:9999  (JSONRPC)
+
+--- Capabilities ---
+Streaming           : True
+Push notifications  : False
+Extended agent card : True
+
+history {
+  role: ROLE_USER
+  parts { text: "Hi there!" }
+}
+history {
+  role: ROLE_AGENT
+  parts { text: "Processing request..." }
+}
+...
+artifacts {
+  parts {
+    text: "Hello, World! I have received your request (Hi there!)"
+    media_type: "text/plain"
+  }
+}
+...
+task_state: TASK_STATE_COMPLETED
+message { parts { text: "Request is completed!" } }
+```
+
+## Container deployment
+
+You can also run the Hello World agent as a container:
+
+<Steps>
+  <Step title="Navigate to the agent directory">
+    ```bash
+    cd samples/python/agents/helloworld
+    ```
+  </Step>
+  <Step title="Build the image">
+    ```bash
+    podman build . -t helloworld-a2a-server
+    ```
+    Docker is also supported: replace `podman` with `docker`.
+  </Step>
+  <Step title="Run the container">
+    ```bash
+    podman run -p 9999:9999 helloworld-a2a-server
+    ```
+  </Step>
+  <Step title="Verify with the CLI host">
+    ```bash
+    cd samples/python/hosts/cli
+    uv run . --agent http://127.0.0.1:9999
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  Treat every piece of data received from an external agent — AgentCard fields,
+  messages, artifact text — as untrusted input. Passing unvalidated agent
+  responses directly into LLM prompts can expose your application to prompt
+  injection attacks.
+</Warning>

@@ -1,0 +1,108 @@
+---
+title: "Host Applications in the A2A Ecosystem"
+sidebarTitle: "Overview"
+description: "Host applications are A2A clients that read AgentCards, route user requests to remote agents, and present results — the user-facing layer of any A2A deployment."
+---
+
+Host applications are the client-side layer of the Agent2Agent (A2A) protocol. Where remote agents expose JSON-RPC 2.0 endpoints and advertise their capabilities through AgentCards, a host is responsible for reading those cards, deciding which agent (or agents) to invoke, sending tasks on behalf of the end user, and presenting the resulting artifacts or messages back to them. This page describes what a host application is, how it relates to the `A2AClient` and `A2ACardResolver` primitives, and which sample host implementations are available in the repository.
+
+## What a Host Application Does
+
+Every host application follows the same fundamental interaction pattern:
+
+1. **Discover** — it calls `A2ACardResolver.get_agent_card()` to fetch a remote agent's `AgentCard` from its well-known URL (`/.well-known/agent.json`).
+2. **Connect** — it constructs an `A2AClient` (or `RemoteAgentConnections` wrapper) backed by the resolved card.
+3. **Route** — it forwards the user's request as a `Message` or `Task` to the appropriate remote agent, optionally choosing between multiple registered agents based on their card descriptions.
+4. **Present** — it renders the `Task` status updates, streaming events, and final artifacts to the end user — whether that is a terminal, a web UI, or another agent.
+
+The `A2AClient` handles all JSON-RPC 2.0 framing, streaming negotiation (server-sent events), and push-notification configuration. The host application itself only needs to decide *what* to ask and *whom* to ask.
+
+## Relationship Between Host, A2AClient, and Remote Agents
+
+```text
+User / UI
+    │
+    ▼
+Host Application
+    ├── A2ACardResolver  ──►  GET /.well-known/agent.json
+    └── A2AClient        ──►  POST /  (JSON-RPC send_message / send_stream)
+                                   Remote A2A Agent Server
+```
+
+The `A2ACardResolver` is a one-time lookup that populates an `AgentCard` object describing the agent's name, description, skills, and capabilities (including whether it supports streaming). The `A2AClient` wraps an `httpx.AsyncClient` and uses that card to address every subsequent JSON-RPC call. A multi-agent host holds one `A2AClient` (or equivalent) per registered remote agent and uses an orchestrating LLM to choose which connection to invoke for any given user request.
+
+<Warning>
+  Treat all data received from a remote agent — AgentCards, messages, artifacts, task statuses — as **untrusted input**. Never pass unsanitized agent-provided text directly into an LLM prompt; doing so can expose your application to prompt-injection attacks.
+</Warning>
+
+## Available Host Samples
+
+The repository ships several host implementations that demonstrate different integration patterns:
+
+<CardGroup cols={2}>
+  <Card
+    title="CLI Host"
+    icon="terminal"
+    href="/hosts/cli-host"
+  >
+    A lightweight command-line client that resolves an AgentCard, supports both streaming and non-streaming task completion, optional push notifications, and file attachments. The quickest way to talk to any A2A server.
+  </Card>
+  <Card
+    title="Multi-Agent Host"
+    icon="diagram-project"
+    href="/hosts/multiagent-host"
+  >
+    A Google ADK-based orchestrating host that maintains a registry of remote agents, uses an LLM to route requests, and wraps each remote connection in a typed `RemoteAgentConnections` client.
+  </Card>
+  <Card
+    title="Demo Web UI"
+    icon="browser"
+    href="https://github.com/MathematicusLucian/A2A/tree/main/demo"
+  >
+    A Mesop-based web application that visualises conversations between the end user and the Host Agent. Renders text, images, and web-form artifacts; includes dedicated tabs for task history and agent card inspection.
+  </Card>
+  <Card
+    title="GUI Host (a2a_gui)"
+    icon="window"
+    href="https://github.com/MathematicusLucian/A2A/tree/main/samples/python/hosts/a2a_gui"
+  >
+    A desktop GUI host sample for exploring A2A agent interactions with a graphical interface.
+  </Card>
+  <Card
+    title="BeeAI Chat Host"
+    icon="bee"
+    href="https://github.com/MathematicusLucian/A2A/tree/main/samples/python/hosts/beeai-chat"
+  >
+    A chat-oriented host built on the BeeAI framework, demonstrating how third-party agent runtimes can act as A2A host clients.
+  </Card>
+  <Card
+    title="Content Creation Host"
+    icon="pen-nib"
+    href="https://github.com/MathematicusLucian/A2A/tree/main/samples/python/hosts/content_creation"
+  >
+    A multi-language interoperability demo where Python, Go, and other agents collaborate on a content creation pipeline, showing how agents written in different SDKs can be orchestrated by a single host.
+  </Card>
+</CardGroup>
+
+## Choosing a Host Pattern
+
+<Accordion title="Single-agent hosts (CLI)">
+  Use the CLI host when you want to manually test or debug an individual A2A server. It connects to exactly one agent URL per run and loops interactively, making it ideal for integration testing and demonstrations.
+</Accordion>
+
+<Accordion title="Multi-agent orchestrating hosts">
+  Use the multi-agent host pattern when your application needs to route requests across several specialist agents. The host agent itself is a full A2A server — downstream tools and UIs can talk to it via A2A just like any other agent. The LLM-powered routing layer decides which remote agent(s) to invoke for each request.
+</Accordion>
+
+<Accordion title="Web / GUI hosts">
+  The Demo Web UI and GUI host samples show how to surface A2A conversations in a browser or desktop window. They use the same `HostAgent` / `RemoteAgentConnections` backend as the multi-agent CLI host, adding a presentation tier on top.
+</Accordion>
+
+## Security Considerations
+
+<Note>
+  These host samples are provided for demonstration purposes. When building production hosts, you must:
+  - Validate and sanitize all content received from remote agents before using it in LLM prompts.
+  - Implement proper authentication for both outbound requests (bearer tokens, API keys) and inbound push notifications (JWT verification).
+  - Scope AgentCard resolution to trusted registries or allowlists of remote agent URLs.
+</Note>

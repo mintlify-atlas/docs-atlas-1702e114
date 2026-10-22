@@ -1,0 +1,154 @@
+---
+title: "Agent2Agent Protocol: Open Standard for Agent Interoperability"
+sidebarTitle: "Introduction"
+description: "A2A is an open protocol enabling AI agents built on different frameworks and languages to communicate, delegate tasks, and collaborate via JSON-RPC 2.0 over HTTP."
+---
+
+Agent2Agent (A2A) is an open, standardized protocol that gives AI agents a common language for communication, task delegation, and collaboration — regardless of which framework or runtime they are built with. This page explains the problem A2A solves, how its architecture is structured, and the ecosystem of SDKs and frameworks that support it today.
+
+## Why A2A?
+
+Modern AI systems are rarely a single model. Production workloads combine specialized agents — planners, tools, retrieval systems, code executors — often built by different teams using different frameworks. Without a common communication standard, integrating these agents requires bespoke adapters, duplicated auth logic, and tight coupling that breaks every time an upstream agent changes.
+
+A2A defines exactly one thing: how one agent talks to another. It specifies discovery, capability advertisement, task lifecycle, message shape, streaming, and extension negotiation — so any A2A-compliant agent can call any other without custom glue code.
+
+<Note>
+  All data received from an external agent — AgentCard fields, messages, artifacts, task statuses — must be treated as untrusted input. Always validate and sanitize before using in LLM prompts or downstream logic.
+</Note>
+
+## Architecture Overview
+
+A2A is built on four interlocking primitives: **AgentCards**, **Tasks**, **Messages/Artifacts**, and **JSON-RPC 2.0 transport**. Extensions and streaming are layered on top.
+
+### AgentCard — Discovery & Capability Advertisement
+
+Every A2A server publishes a machine-readable `AgentCard` at a well-known URL (`/.well-known/agent.json` by default). The card describes the agent's identity, what protocols it supports, which input/output media types it accepts, and its discrete skills.
+
+```json
+{
+  "name": "Hello World Agent",
+  "description": "Just a hello world agent",
+  "version": "0.0.1",
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "capabilities": {
+    "streaming": true,
+    "extendedAgentCard": true
+  },
+  "supportedInterfaces": [
+    {
+      "protocolBinding": "JSONRPC",
+      "url": "http://127.0.0.1:9999",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "skills": [
+    {
+      "id": "echo_bot",
+      "name": "Echo Bot",
+      "description": "Acknowledges client requests and responds with a Hello World message.",
+      "inputModes": ["text/plain"],
+      "outputModes": ["text/plain"],
+      "tags": ["a2a", "echo-example"],
+      "examples": ["hi", "how are you"]
+    }
+  ]
+}
+```
+
+Clients use `A2ACardResolver` to fetch and parse this card before establishing a session.
+
+### JSON-RPC 2.0 Transport
+
+All agent-to-agent communication uses [JSON-RPC 2.0](https://www.jsonrpc.org/specification) over HTTP POST. The protocol defines four core methods:
+
+| Method | Description |
+|---|---|
+| `message/send` | Send a message and receive a complete `Task` response |
+| `message/stream` | Send a message and receive incremental SSE events |
+| `tasks/get` | Retrieve the current state of an existing task |
+| `tasks/cancel` | Request cancellation of a running task |
+
+### Tasks & State Lifecycle
+
+When a client sends a message, the server creates a **Task** — a stateful unit of work. Tasks carry a unique `id`, a `contextId` that groups related multi-turn interactions, and a `status.state` field that progresses through:
+
+`submitted` → `working` → `input-required` (optional) → `completed` / `failed` / `canceled`
+
+The `input-required` state enables multi-turn conversations: the agent signals that it needs more information, and the client resumes the same task context by echoing back `taskId` and `contextId` in its next message.
+
+### Messages, Parts & Artifacts
+
+Messages are role-tagged (`user` or `agent`) and carry a list of `parts`. Each part is typed:
+
+- **TextPart** — plain text or markdown (`kind: "text"`)
+- **FilePart** — file content as base64 bytes or a URI reference (`kind: "file"`)
+- **DataPart** — structured JSON payload (`kind: "data"`)
+
+Completed tasks surface their results as **Artifacts** — named collections of parts that represent the final output rather than conversational turns.
+
+### Streaming via SSE
+
+When `AgentCapabilities.streaming` is `true` and the client calls `message/stream`, the server responds with a `text/event-stream` (Server-Sent Events) body. Each event is a JSON-RPC result frame that is one of:
+
+- **Task** — the initial task record
+- **TaskStatusUpdateEvent** — state transitions and interim messages
+- **TaskArtifactUpdateEvent** — incremental artifact delivery
+
+The final event carries `"final": true`, signalling the stream is complete.
+
+### Extensions
+
+A2A supports optional capability extensions negotiated via the `X-A2A-Extensions` HTTP header. An extension is identified by a URI. Built-in extensions in this repository include:
+
+- **Timestamp** (`…/extensions/timestamp/v1`) — adds RFC 3339 creation timestamps to Message and Artifact metadata
+- **Traceability** (`…/extensions/traceability/v1`) — attaches structured call-graph traces (tool and agent invocations, latencies, token counts) to responses
+- **AGP** — Agent Gateway Protocol transport binding for additional routing topologies
+
+## Ecosystem
+
+A2A ships official SDKs for five languages and sample integrations for the most widely used agentic frameworks.
+
+### SDKs
+
+<CardGroup cols={3}>
+  <Card title="Python SDK" icon="python" href="https://github.com/a2aproject/a2a-python">
+    `a2a-sdk` — server, client, types, helpers, and task store utilities for Python 3.10+
+  </Card>
+  <Card title="Go SDK" icon="golang" href="https://github.com/a2aproject/a2a-go">
+    Idiomatic Go implementation with full protocol type coverage
+  </Card>
+  <Card title="Java SDK" icon="java" href="https://github.com/a2aproject/a2a-java">
+    JVM-based SDK with Spring Boot integration support
+  </Card>
+  <Card title="JavaScript SDK" icon="js" href="https://github.com/a2aproject/a2a-js">
+    Node.js / TypeScript SDK for server and client roles
+  </Card>
+  <Card title=".NET SDK" icon="microsoft" href="https://github.com/a2aproject/a2a-dotnet">
+    C# SDK with ASP.NET Core integration
+  </Card>
+  <Card title="Rust SDK" icon="rust" href="https://github.com/a2aproject/a2a-rs">
+    Community Rust implementation for performance-sensitive workloads
+  </Card>
+</CardGroup>
+
+### Supported Frameworks
+
+The samples directory contains working integrations for: **LangGraph**, **CrewAI**, **Google ADK**, **Semantic Kernel**, **LlamaIndex**, **Marvin**, **AG2**, and **MindsDB** — covering both Python and multi-language scenarios.
+
+## Navigate the Docs
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run a local A2A agent server and send your first JSON-RPC message in under five minutes.
+  </Card>
+  <Card title="Core Concepts" icon="book-open" href="/core-concepts">
+    Deep-dive into AgentCards, Tasks, Messages, Artifacts, JSON-RPC methods, and streaming.
+  </Card>
+  <Card title="AgentCard Reference" icon="id-card" href="/agents/agent-card">
+    Full field reference for the AgentCard discovery document and its skill definitions.
+  </Card>
+  <Card title="Python Helloworld Sample" icon="code" href="/samples/python/helloworld">
+    Annotated walkthrough of the canonical Python server and test client implementation.
+  </Card>
+</CardGroup>

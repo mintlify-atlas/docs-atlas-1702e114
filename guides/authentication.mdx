@@ -1,0 +1,307 @@
+---
+title: "Securing A2A Agents: Authentication Patterns"
+sidebarTitle: "Authentication"
+description: "Learn how A2A separates agent-level auth from user auth, how to declare security requirements on the AgentCard, and how clients pass bearer tokens or OAuth2 credentials."
+---
+
+Authentication in A2A operates at two distinct layers: the credential an A2A **client** presents to reach an **agent** (agent-level auth), and any further credential the agent may need to act on behalf of a user with a downstream service (user-delegated auth). This page covers both layers, the `AgentAuthentication` field on `AgentCard`, bearer-token and OAuth 2.0 flows, the headless-agent CIBA pattern, and the Java Magic 8-Ball Keycloak sample.
+
+<Note>
+  Agent-level authentication is negotiated between two machines — never assume
+  the calling party is a trusted human. Always validate tokens on the server
+  side and treat all data received from an external agent as untrusted input.
+</Note>
+
+---
+
+## How Authentication is Declared
+
+An agent advertises its security requirements inside the `AgentCard` that is served at `/.well-known/agent.json`. Clients fetch the card first, inspect the `authentication` field, and obtain the appropriate credential before sending any task.
+
+### The `AgentAuthentication` Object
+
+<ParamField body="schemes" type="string[]" required>
+  List of authentication scheme names the agent accepts. Common values: `"bearer"`, `"oauth2"`, `"apiKey"`.
+</ParamField>
+
+<ParamField body="credentials" type="string">
+  A JSON-encoded string carrying scheme-specific metadata. For OAuth 2.0 this typically holds `tokenUrl` and `scopes`.
+</ParamField>
+
+The following snippet is taken directly from the headless-agent auth sample (`samples/python/agents/headless_agent_auth/__main__.py`):
+
+```python python
+agent_card = AgentCard(
+    name='Staff0 HR Agent',
+    description='This agent handles external verification requests about Staff0 employees made by third parties.',
+    url=f'http://{host}:{port}/',
+    version='0.1.0',
+    default_input_modes=HRAgent.SUPPORTED_CONTENT_TYPES,
+    default_output_modes=HRAgent.SUPPORTED_CONTENT_TYPES,
+    capabilities=AgentCapabilities(streaming=True),
+    skills=[
+        AgentSkill(
+            id='is_active_employee',
+            name='Check Employment Status Tool',
+            description='Confirm whether a person is an active employee of the company.',
+            tags=['employment status'],
+            examples=[
+                'Does John Doe with email jdoe@staff0.com work at Staff0?'
+            ],
+        )
+    ],
+    authentication=AgentAuthentication(
+        schemes=['oauth2'],
+        credentials=json.dumps(
+            {
+                'tokenUrl': f'https://{os.getenv("HR_AUTH0_DOMAIN")}/oauth/token',
+                'scopes': {
+                    'read:employee_status': 'Allows confirming whether a person is an active employee of the company.'
+                },
+            }
+        ),
+    ),
+)
+```
+
+When a client resolves the agent card it reads `authentication.credentials`, extracts the `tokenUrl`, and uses the OAuth 2.0 Client Credentials grant to obtain an access token before making any A2A call.
+
+---
+
+## Passing Credentials on Every Request
+
+Regardless of scheme, the client attaches credentials in the HTTP `Authorization` header on every JSON-RPC request.
+
+<Tabs>
+  <Tab title="Bearer Token">
+    ```http http
+    POST / HTTP/1.1
+    Host: agent.example.com
+    Content-Type: application/json
+    Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+
+    {
+      "jsonrpc": "2.0",
+      "id": "1",
+      "method": "message/send",
+      "params": { ... }
+    }
+    ```
+  </Tab>
+  <Tab title="OAuth2 Client Credentials">
+    ```python python
+    # From samples/python/agents/headless_agent_auth/test_client.py
+    class AgentAuth(httpx.Auth):
+        """Custom httpx authentication class to inject access token required by agent."""
+
+        def __init__(self, agent_card: AgentCard):
+            self.agent_card = agent_card
+
+        def auth_flow(self, request):
+            global access_token
+            auth = self.agent_card.authentication
+
+            # skip if not using oauth2 or credentials details are missing
+            if not (
+                any(scheme.lower() == 'oauth2' for scheme in auth.schemes)
+                and auth.credentials
+            ):
+                yield request
+                return
+
+            if not access_token:
+                token_url = json.loads(auth.credentials)['tokenUrl']
+                get_token = GetToken(
+                    domain=urlparse(token_url).hostname,
+                    client_id=os.getenv('A2A_CLIENT_AUTH0_CLIENT_ID'),
+                    client_secret=os.getenv('A2A_CLIENT_AUTH0_CLIENT_SECRET'),
+                )
+                access_token = get_token.client_credentials(
+                    os.getenv('HR_AGENT_AUTH0_AUDIENCE')
+                )['access_token']
+
+            request.headers['Authorization'] = f'Bearer {access_token}'
+            yield request
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Server-Side Token Validation with Middleware
+
+On the agent side, you enforce authentication before any A2A handler runs. The headless-agent sample uses a Starlette middleware class that reads the `AgentCard`'s declared requirements and validates the incoming `Bearer` token on every request.
+
+```python python
+# samples/python/agents/headless_agent_auth/oauth2_middleware.py
+
+class OAuth2Middleware(BaseHTTPMiddleware):
+    """Starlette middleware that authenticates A2A access using an OAuth2 bearer token."""
+
+    def __init__(
+        self,
+        app: Starlette,
+        agent_card: AgentCard = None,
+        public_paths: list[str] = None,
+    ):
+        super().__init__(app)
+        self.agent_card = agent_card
+        self.public_paths = set(public_paths or [])
+        self.a2a_auth = {}
+
+        if agent_card.authentication:
+            credentials = json.loads(
+                agent_card.authentication.credentials or '{}'
+            )
+            if 'scopes' in credentials:
+                self.a2a_auth = {
+                    'required_scopes': credentials['scopes'].keys()
+                }
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+
+        # Allow public paths and anonymous access
+        if path in self.public_paths or not self.a2a_auth:
+            return await call_next(request)
+
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return self._unauthorized(
+                'Missing or malformed Authorization header.', request
+            )
+
+        access_token = auth_header.split('Bearer ')[1]
+
+        try:
+            payload = await api_client.verify_access_token(
+                access_token=access_token
+            )
+            scopes = payload.get('scope', '').split()
+            missing_scopes = [
+                s
+                for s in self.a2a_auth['required_scopes']
+                if s not in scopes
+            ]
+            if missing_scopes:
+                return self._forbidden(
+                    f'Missing required scopes: {missing_scopes}', request
+                )
+        except Exception as e:
+            return self._forbidden(f'Authentication failed: {e}', request)
+
+        return await call_next(request)
+```
+
+The middleware is attached after building the ASGI application, and the `/.well-known/agent.json` endpoint is explicitly exempted so unauthenticated clients can still discover the card:
+
+```python python
+app = server.build()
+app.add_middleware(
+    OAuth2Middleware,
+    agent_card=agent_card,
+    public_paths=['/.well-known/agent.json'],
+)
+```
+
+---
+
+## Pattern: Headless Agent with Auth0 CIBA
+
+The `headless_agent_auth` sample demonstrates a two-level auth flow commonly needed when a headless agent must act on behalf of a real user to access a downstream API.
+
+<Steps>
+  <Step title="Client obtains agent-level token">
+    The A2A client uses the **OAuth 2.0 Client Credentials** flow against Auth0 to get a bearer token scoped to `read:employee_status`. This is the credential it presents to the HR Agent.
+  </Step>
+  <Step title="Agent receives request">
+    The HR Agent validates the incoming bearer token with the `OAuth2Middleware`. On success, it proceeds to execute the task.
+  </Step>
+  <Step title="Agent requests user consent via CIBA">
+    The agent uses Auth0's **Client-Initiated Backchannel Authentication (CIBA)** flow to push a notification to the employee's enrolled device. The employee approves sharing their employment details.
+  </Step>
+  <Step title="Agent calls downstream API with user token">
+    After the employee approves, Auth0 issues a token scoped to `read:employee`. The agent uses that token to call the internal HR API and returns the result to the A2A client.
+  </Step>
+</Steps>
+
+Environment variables required by the sample:
+
+```bash bash
+# samples/python/agents/headless_agent_auth/.env.example
+
+# Gemini
+GOOGLE_API_KEY=
+
+# Auth0
+HR_AUTH0_DOMAIN=
+
+# A2A Client -> HR AGENT (auth method: Client Credentials)
+A2A_CLIENT_AUTH0_CLIENT_ID=
+A2A_CLIENT_AUTH0_CLIENT_SECRET=
+
+# HR AGENT -> HR API (auth method: CIBA)
+HR_AGENT_AUTH0_CLIENT_ID=
+HR_AGENT_AUTH0_CLIENT_SECRET=
+
+HR_AGENT_AUTH0_AUDIENCE=https://staff0/agent
+HR_API_AUTH0_AUDIENCE=https://staff0/api
+```
+
+---
+
+## Pattern: Keycloak OAuth2 — Java Magic 8-Ball Security Sample
+
+The Java `magic_8_ball_security` sample shows how to secure an A2A server using **Keycloak** as the OAuth2 provider with **Quarkus Dev Services**, which spins up a Keycloak container automatically during development.
+
+<CardGroup cols={2}>
+  <Card title="Server (Quarkus + LangChain4j)" icon="server">
+    The agent server is built with Quarkus and uses the A2A Java SDK. Quarkus Dev Services provisions and configures Keycloak automatically when you run `mvn quarkus:dev`.
+  </Card>
+  <Card title="Client (JBang + CredentialService)" icon="key">
+    The Java test client implements the SDK's `CredentialService` interface via a `KeycloakOAuth2CredentialService` that uses Keycloak's `AuthzClient` to obtain tokens before sending requests.
+  </Card>
+</CardGroup>
+
+```bash bash
+# Start the agent server (auto-provisions Keycloak)
+cd samples/java/agents/magic-8-ball-security/server
+export QUARKUS_LANGCHAIN4J_AI_GEMINI_API_KEY=your_api_key_here
+mvn quarkus:dev
+
+# Run the client (connects with Keycloak token)
+cd samples/java/agents/magic-8-ball-security/client/src/main/java/com/samples/a2a/client
+jbang TestClientRunner.java --server-url http://localhost:11000
+```
+
+The sample also supports multiple transports on a single port — JSON-RPC (default), HTTP+REST, and gRPC:
+
+```bash bash
+# Use REST transport
+jbang TestClientRunner.java --transport rest
+
+# Use gRPC transport
+jbang TestClientRunner.java --transport grpc
+```
+
+---
+
+## Security Recommendations
+
+<Warning>
+  Always treat any agent operating outside of your direct control as a
+  potentially untrusted entity. Validate and sanitize all data received from
+  external agents — including `AgentCard` fields — before using that data to
+  construct LLM prompts, as malicious agents could attempt prompt-injection
+  attacks via crafted card content.
+</Warning>
+
+<Accordion title="Checklist for production agent authentication">
+  - Serve `/.well-known/agent.json` without authentication so clients can discover security requirements.
+  - Validate every bearer token on the server before processing any A2A method.
+  - Scope tokens as narrowly as possible — avoid issuing tokens with broad permissions to agent-to-agent calls.
+  - Rotate client credentials regularly; never hard-code them in source code.
+  - Use environment variables or a secrets manager (e.g. Google Secret Manager, AWS Secrets Manager) to inject credentials at runtime.
+  - Log authentication failures with enough context to detect brute-force or token-replay attacks.
+  - When agents act on behalf of users, obtain explicit user consent using a delegated auth flow such as CIBA or Authorization Code.
+</Accordion>

@@ -1,0 +1,402 @@
+---
+title: ".NET C# A2A Samples: Basic, CLI, and Semantic Kernel"
+sidebarTitle: ".NET"
+description: "Run A2A agents in .NET 9 with three demos: a foundational Echo/Calculator pair, a safe CLI command executor, and an AI agent powered by Microsoft Semantic Kernel."
+---
+
+The A2A .NET samples demonstrate three progressively advanced patterns for building Agent-to-Agent protocol-compatible agents in C# using the `A2A` and `A2A.AspNetCore` NuGet packages. `BasicA2ADemo` shows the minimal wiring needed to run an agent server and connect a client. `A2ACliDemo` shows how to bridge agents with system-level operations using a whitelist-secured command executor. `A2ASemanticKernelDemo` shows how to integrate Microsoft Semantic Kernel for AI-powered text processing. All three demos run on .NET 9 and support Windows, Linux, and macOS.
+
+<Warning>
+  All samples are for demonstration purposes only. Treat all data received from external agents as untrusted input. The CLI agent's whitelist approach is illustrative — review security implications carefully before deploying anything similar in a real environment.
+</Warning>
+
+## Prerequisites
+
+- [.NET 9.0 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)
+- Windows, Linux, or macOS
+
+## Demo Overview
+
+<CardGroup cols={3}>
+  <Card title="BasicA2ADemo" icon="building">
+    EchoServer (port 5001), CalculatorServer (port 5002), and SimpleClient. Covers agent discovery, message-based communication, and task tracking.
+  </Card>
+  <Card title="A2ACliDemo" icon="terminal">
+    CLIServer (port 5003) executes whitelisted system commands. CLIClient sends command strings and displays structured output.
+  </Card>
+  <Card title="A2ASemanticKernelDemo" icon="brain">
+    AIServer (port 5000) powered by Microsoft Semantic Kernel. Supports text summarization, sentiment analysis, idea generation, and translation.
+  </Card>
+</CardGroup>
+
+## BasicA2ADemo
+
+The `BasicA2ADemo` is the recommended starting point. It runs two agent servers in parallel — an EchoServer that returns every message prefixed with `"Echo: "`, and a CalculatorServer that performs arithmetic — plus a `SimpleClient` that connects to both.
+
+### Running the Demo
+
+<Tabs>
+  <Tab title="Windows (Quick Start)">
+    ```bat
+    cd samples/dotnet/BasicA2ADemo
+    run-demo.bat
+    ```
+
+    The batch script opens each server and the client in separate console windows.
+  </Tab>
+  <Tab title="Manual (All Platforms)">
+    <Steps>
+      <Step title="Start the Echo Agent (port 5001)">
+        ```bash
+        cd samples/dotnet/BasicA2ADemo/EchoServer
+        dotnet run
+        ```
+      </Step>
+      <Step title="Start the Calculator Agent (port 5002)">
+        ```bash
+        cd samples/dotnet/BasicA2ADemo/CalculatorServer
+        dotnet run
+        ```
+      </Step>
+      <Step title="Run the Simple Client">
+        ```bash
+        cd samples/dotnet/BasicA2ADemo/SimpleClient
+        dotnet run
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+### EchoAgent Implementation
+
+The `EchoAgent` illustrates the minimal shape of an A2A agent in .NET. It attaches two callbacks to the `ITaskManager`: one for processing incoming messages and one for serving the AgentCard.
+
+```csharp
+using A2A;
+using A2A.AspNetCore;
+
+public class EchoAgent
+{
+    public void Attach(ITaskManager taskManager)
+    {
+        taskManager.OnMessageReceived = ProcessMessageAsync;
+        taskManager.OnAgentCardQuery = GetAgentCardAsync;
+    }
+
+    private Task<Message> ProcessMessageAsync(
+        MessageSendParams messageSendParams,
+        CancellationToken cancellationToken)
+    {
+        var userText = GetTextFromMessage(messageSendParams.Message);
+
+        var responseMessage = new Message
+        {
+            Role = MessageRole.Agent,
+            MessageId = Guid.NewGuid().ToString(),
+            ContextId = messageSendParams.Message.ContextId,
+            Parts = [new TextPart { Text = $"Echo: {userText}" }]
+        };
+
+        return Task.FromResult(responseMessage);
+    }
+
+    private Task<AgentCard> GetAgentCardAsync(
+        string agentUrl,
+        CancellationToken cancellationToken)
+    {
+        return Task.FromResult(new AgentCard
+        {
+            Name = "Simple Echo Agent",
+            Description = "A basic agent that echoes back any message you send to it.",
+            Url = agentUrl,
+            Version = "1.0.0",
+            DefaultInputModes = ["text"],
+            DefaultOutputModes = ["text"],
+            Capabilities = new AgentCapabilities { Streaming = true }
+        });
+    }
+
+    private static string GetTextFromMessage(Message message)
+    {
+        var textPart = message.Parts.OfType<TextPart>().FirstOrDefault();
+        return textPart?.Text ?? "[No text content]";
+    }
+}
+```
+
+### EchoServer Startup (`Program.cs`)
+
+```csharp
+using A2A;
+using A2A.AspNetCore;
+using EchoServer;
+
+var builder = WebApplication.CreateBuilder(args);
+builder.Logging.AddConsole();
+var app = builder.Build();
+
+var taskManager = new TaskManager();
+var echoAgent = new EchoAgent();
+echoAgent.Attach(taskManager);
+
+app.MapA2A(taskManager, "/");   // Registers the JSON-RPC endpoint
+app.MapGet("/health", () => Results.Ok(new { Status = "Healthy" }));
+
+app.Run("http://localhost:5001");
+```
+
+The `MapA2A` extension registers both the `/.well-known/agent.json` AgentCard endpoint and the JSON-RPC POST handler at the specified path.
+
+## A2ACliDemo
+
+The CLI demo shows how an A2A agent can execute system commands safely. The `CLIAgent` enforces a hardcoded `AllowedCommands` whitelist before spawning any process, and automatically selects `cmd.exe` on Windows or `/bin/bash` on Linux/macOS.
+
+### Running the Demo
+
+<Tabs>
+  <Tab title="Windows (Quick Start)">
+    ```bat
+    cd samples/dotnet/A2ACliDemo
+    run-demo.bat
+    ```
+  </Tab>
+  <Tab title="Manual (All Platforms)">
+    <Steps>
+      <Step title="Start the CLI Agent Server (port 5003)">
+        ```bash
+        cd samples/dotnet/A2ACliDemo/CLIServer
+        dotnet run
+        ```
+      </Step>
+      <Step title="Run the Interactive Client">
+        ```bash
+        cd samples/dotnet/A2ACliDemo/CLIClient
+        dotnet run
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+### CLIAgent — Whitelist and Execution
+
+```csharp
+public class CLIAgent
+{
+    private static readonly HashSet<string> AllowedCommands = new()
+    {
+        // File operations
+        "dir", "ls", "pwd", "cat", "type", "head", "tail",
+        // System info
+        "whoami", "date", "time", "echo",
+        // Process / network
+        "ps", "tasklist", "netstat", "ipconfig", "ping",
+        // Dev tools
+        "git", "dotnet", "node", "npm", "python"
+    };
+
+    public void Attach(ITaskManager taskManager)
+    {
+        taskManager.OnMessageReceived = ProcessMessageAsync;
+        taskManager.OnAgentCardQuery = GetAgentCardAsync;
+    }
+
+    private async Task<string> ExecuteCommandAsync(
+        string input,
+        CancellationToken cancellationToken)
+    {
+        var (command, arguments) = ParseCommand(input);
+
+        if (!AllowedCommands.Contains(command.ToLowerInvariant()))
+        {
+            return $"❌ Command '{command}' is not allowed. " +
+                   $"Allowed: {string.Join(", ", AllowedCommands)}";
+        }
+
+        using var process = new Process();
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            process.StartInfo.FileName = "cmd.exe";
+            process.StartInfo.Arguments = $"/c {command} {arguments}";
+        }
+        else
+        {
+            process.StartInfo.FileName = "/bin/bash";
+            process.StartInfo.Arguments = $"-c \"{command} {arguments}\"";
+        }
+
+        process.StartInfo.UseShellExecute = false;
+        process.StartInfo.RedirectStandardOutput = true;
+        process.StartInfo.RedirectStandardError = true;
+        process.StartInfo.CreateNoWindow = true;
+
+        process.Start();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        await process.WaitForExitAsync(cancellationToken);
+
+        return FormatCommandResult(/* ... */);
+    }
+}
+```
+
+### Example CLI Interactions
+
+```text
+CLI> ls -la
+CLI> git status
+CLI> dotnet --version
+CLI> whoami
+CLI> ping google.com
+```
+
+<Note>
+  Dangerous commands — `rm`, `del`, `rmdir`, `format`, `fdisk`, `sudo`, `kill`, `killall` — are blocked by the whitelist and will return an error message instead of executing.
+</Note>
+
+## A2ASemanticKernelDemo
+
+The Semantic Kernel demo wires an `AIAgent` to Microsoft Semantic Kernel, exposing four AI-powered functions over the A2A protocol. The `AIServer` uses a built-in mock AI service for instant testing; swap in Azure OpenAI or OpenAI by setting environment variables.
+
+### Running the Demo
+
+<Tabs>
+  <Tab title="Windows (Quick Start)">
+    ```bat
+    cd samples/dotnet/A2ASemanticKernelDemo
+    run_demo.bat
+    ```
+  </Tab>
+  <Tab title="Manual (All Platforms)">
+    <Steps>
+      <Step title="Start the AI Server (port 5000)">
+        ```bash
+        cd samples/dotnet/A2ASemanticKernelDemo/AIServer
+        dotnet run --urls=http://localhost:5000
+        ```
+      </Step>
+      <Step title="Run the AI Client">
+        ```bash
+        cd samples/dotnet/A2ASemanticKernelDemo/AIClient
+        dotnet run
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+### AI Provider Configuration
+
+```bash
+# Azure OpenAI
+export AZURE_OPENAI_ENDPOINT=your-endpoint
+export AZURE_OPENAI_API_KEY=your-key
+export AZURE_OPENAI_DEPLOYMENT_NAME=your-deployment
+
+# OpenAI
+export OPENAI_API_KEY=your-key
+```
+
+### Supported AI Functions
+
+The `AIAgent` routes incoming messages by prefix keyword to one of four Semantic Kernel prompt invocations:
+
+| Prefix | Function | Description |
+|--------|----------|-------------|
+| `summarize:` | `SummarizeTextAsync` | Condenses text to 2–3 sentences |
+| `sentiment:` | `AnalyzeSentimentAsync` | Returns sentiment, confidence score, and emotions |
+| `ideas:` | `GenerateIdeasAsync` | Generates 5 creative suggestions for the given topic |
+| `translate:` | `TranslateTextAsync` | Translates text to Spanish (default target language) |
+| `help` | `GetCapabilitiesAsync` | Lists all available functions and examples |
+
+### AIAgent Implementation
+
+```csharp
+public class AIAgent
+{
+    private readonly Kernel _kernel;
+    private readonly ILogger<AIAgent> _logger;
+
+    public AIAgent(Kernel kernel, ILogger<AIAgent> logger)
+    {
+        _kernel = kernel;
+        _logger = logger;
+    }
+
+    public void Attach(ITaskManager taskManager)
+    {
+        taskManager.OnMessageReceived = ProcessMessageAsync;
+        taskManager.OnAgentCardQuery = GetAgentCardAsync;
+    }
+
+    private async Task<Message> ProcessMessageAsync(
+        MessageSendParams messageSendParams,
+        CancellationToken cancellationToken)
+    {
+        var userText = GetTextFromMessage(messageSendParams.Message);
+        var lowerText = userText.ToLower();
+
+        if (lowerText.StartsWith("summarize:"))
+        {
+            var text = userText[(userText.IndexOf(':') + 1)..].Trim();
+            return await SummarizeTextAsync(text);
+        }
+        else if (lowerText.StartsWith("sentiment:"))
+        {
+            var text = userText[(userText.IndexOf(':') + 1)..].Trim();
+            return await AnalyzeSentimentAsync(text);
+        }
+        else if (lowerText.StartsWith("ideas:"))
+        {
+            var topic = userText[(userText.IndexOf(':') + 1)..].Trim();
+            return await GenerateIdeasAsync(topic);
+        }
+        else if (lowerText.StartsWith("translate:"))
+        {
+            var text = userText[(userText.IndexOf(':') + 1)..].Trim();
+            return await TranslateTextAsync(text, "Spanish");
+        }
+        else
+        {
+            return await GetCapabilitiesAsync();
+        }
+    }
+
+    private Task<AgentCard> GetAgentCardAsync(
+        string agentUrl,
+        CancellationToken cancellationToken)
+    {
+        return Task.FromResult(new AgentCard
+        {
+            Name = "AI Agent",
+            Description = "AI-powered agent using Semantic Kernel for text processing and analysis",
+            Url = agentUrl,
+            Version = "1.0.0",
+            DefaultInputModes = ["text"],
+            DefaultOutputModes = ["text"],
+            Capabilities = new AgentCapabilities { Streaming = false }
+        });
+    }
+}
+```
+
+### Example Prompts
+
+```text
+summarize: Artificial intelligence is transforming software development by enabling...
+sentiment: I absolutely love how intuitive this API is — it made my day!
+ideas: sustainable software development practices
+translate: Good morning, how are you?
+help
+```
+
+## Port Reference
+
+| Demo | Component | Port |
+|------|-----------|------|
+| BasicA2ADemo | EchoServer | `5001` |
+| BasicA2ADemo | CalculatorServer | `5002` |
+| A2ACliDemo | CLIServer | `5003` |
+| A2ASemanticKernelDemo | AIServer | `5000` |

@@ -1,0 +1,349 @@
+---
+title: "Task Lifecycle: States, Transitions, and Multi-Turn Flows"
+sidebarTitle: "Task Lifecycle"
+description: "Understand A2A task states from submitted to completed, how contextId and taskId track conversations, and how to continue tasks across multiple request/response turns."
+---
+
+Every unit of work in Agent2Agent is represented as a **Task**. A task travels through a defined set of states from the moment a client sends its first message until the agent delivers a final result or the conversation is abandoned. Understanding this lifecycle — and how `contextId` and `taskId` keep multi-turn conversations coherent — is essential for building reliable agents and clients. This page explains every state, the valid transitions between them, and shows real JSON request/response sequences from the LangGraph currency agent sample.
+
+## Task states
+
+<CardGroup cols={2}>
+  <Card title="submitted" icon="circle-dot">
+    The task has been created and enqueued but the agent has not yet started processing. This is the initial state emitted when a new task object is first pushed to the event queue.
+  </Card>
+  <Card title="working" icon="spinner">
+    The agent is actively processing the request. The agent may emit one or more intermediate status-update events in this state to give the client real-time progress.
+  </Card>
+  <Card title="input-required" icon="circle-question">
+    The agent cannot proceed without additional information from the user. The task is paused and the client must send a follow-up message that references the same `contextId` and `taskId`.
+  </Card>
+  <Card title="completed" icon="circle-check">
+    The agent has finished successfully. Artifact events containing the result will have been emitted before or alongside this terminal state transition.
+  </Card>
+  <Card title="failed" icon="circle-xmark">
+    An unrecoverable error occurred. The task will not be resumed. Clients should inspect any error details in the status message.
+  </Card>
+  <Card title="canceled" icon="ban">
+    The client issued a `tasks/cancel` request and the agent honoured it. This is a terminal state.
+  </Card>
+</CardGroup>
+
+## State transition flow
+
+A task always starts as `submitted` (or jumps directly to `working` if the agent doesn't publish the initial task object explicitly). From `working`, the three possible outcomes are `completed`, `failed`, or `input-required`. Only `input-required` is non-terminal: the client provides the missing information, which causes the task to re-enter `working`. Any state can transition to `canceled` if the client cancels before completion.
+
+```text
+submitted ──► working ──► completed
+                │
+                ├──────► failed
+                │
+                └──────► input-required ──► working (resumed)
+                               │
+                               └──────► canceled
+```
+
+<Note>
+  `completed`, `failed`, and `canceled` are terminal states. Once a task reaches one of them, no further events for that task will be emitted.
+</Note>
+
+## contextId vs taskId
+
+These two identifiers serve different scopes:
+
+| Identifier | Scope | Purpose |
+|---|---|---|
+| `taskId` | A single processing unit | Uniquely identifies one invocation of the agent. Changes if a task is recreated (e.g., after cancellation). |
+| `contextId` | An entire conversation thread | Ties multiple tasks and messages belonging to the same logical session. Preserved across `input-required` / follow-up turns. |
+
+When a client sends the very first message in a conversation, neither `contextId` nor `taskId` are included — the server generates both. For every subsequent turn, the client **must** echo back the `contextId` and `taskId` it received, so the agent can restore memory and continue the prior thread.
+
+## Single-turn example
+
+A simple request that completes in one round-trip — the agent has all the information it needs.
+
+**Request**
+
+```json
+POST http://localhost:10000
+Content-Type: application/json
+
+{
+    "id": "12113c25-b752-473f-977e-c9ad33cf4f56",
+    "jsonrpc": "2.0",
+    "method": "message/send",
+    "params": {
+        "message": {
+            "kind": "message",
+            "messageId": "120ec73f93024993becf954d03a672bc",
+            "parts": [
+                {
+                    "kind": "text",
+                    "text": "how much is 10 USD in INR?"
+                }
+            ],
+            "role": "user"
+        }
+    }
+}
+```
+
+**Response**
+
+```json
+{
+    "id": "12113c25-b752-473f-977e-c9ad33cf4f56",
+    "jsonrpc": "2.0",
+    "result": {
+        "artifacts": [
+            {
+                "artifactId": "08373241-a745-4abe-a78b-9ca60882bcc6",
+                "name": "conversion_result",
+                "parts": [
+                    {
+                        "kind": "text",
+                        "text": "10 USD is 856.2 INR."
+                    }
+                ]
+            }
+        ],
+        "contextId": "e329f200-eaf4-4ae9-a8ef-a33cf9485367",
+        "history": [
+            {
+                "contextId": "e329f200-eaf4-4ae9-a8ef-a33cf9485367",
+                "kind": "message",
+                "messageId": "120ec73f93024993becf954d03a672bc",
+                "parts": [{ "kind": "text", "text": "how much is 10 USD in INR?" }],
+                "role": "user",
+                "taskId": "58124b63-dd3b-46b8-bf1d-1cc1aefd1c8f"
+            },
+            {
+                "contextId": "e329f200-eaf4-4ae9-a8ef-a33cf9485367",
+                "kind": "message",
+                "messageId": "d8b4d7de-709f-40f7-ae0c-fd6ee398a2bf",
+                "parts": [{ "kind": "text", "text": "Looking up the exchange rates..." }],
+                "role": "agent",
+                "taskId": "58124b63-dd3b-46b8-bf1d-1cc1aefd1c8f"
+            },
+            {
+                "contextId": "e329f200-eaf4-4ae9-a8ef-a33cf9485367",
+                "kind": "message",
+                "messageId": "ee0cb3b6-c3d6-4316-8d58-315c437a2a77",
+                "parts": [{ "kind": "text", "text": "Processing the exchange rates.." }],
+                "role": "agent",
+                "taskId": "58124b63-dd3b-46b8-bf1d-1cc1aefd1c8f"
+            }
+        ],
+        "id": "58124b63-dd3b-46b8-bf1d-1cc1aefd1c8f",
+        "kind": "task",
+        "status": {
+            "state": "completed"
+        }
+    }
+}
+```
+
+The server assigned `contextId` `e329f200…` and `taskId` `58124b63…`. The `history` array records every message exchanged, enabling the agent to replay or summarise the conversation.
+
+## Multi-turn example: input-required
+
+When the user's initial message is ambiguous, the agent transitions to `input-required` and the client must provide a follow-up. The four-step sequence below is taken directly from the LangGraph currency agent.
+
+<Steps>
+  <Step title="Client sends an ambiguous query (Seq 1)">
+    No `contextId` or `taskId` — this is the first message in a new conversation.
+
+    ```json
+    POST http://localhost:10000
+    Content-Type: application/json
+
+    {
+        "id": "27be771b-708f-43b8-8366-968966d07ec0",
+        "jsonrpc": "2.0",
+        "method": "message/send",
+        "params": {
+            "message": {
+                "kind": "message",
+                "messageId": "296eafc9233142bd98279e4055165f12",
+                "parts": [
+                    {
+                        "kind": "text",
+                        "text": "How much is the exchange rate for 1 USD?"
+                    }
+                ],
+                "role": "user"
+            }
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Agent responds with input-required (Seq 2)">
+    The task is paused. The `status.state` is `"input-required"` and the agent's clarifying question is in `status.message`. The client now knows the `contextId` (`a7cc0bef…`) and `taskId` (`9d94c2d4…`) it must use in the next turn.
+
+    ```json
+    {
+        "id": "27be771b-708f-43b8-8366-968966d07ec0",
+        "jsonrpc": "2.0",
+        "result": {
+            "contextId": "a7cc0bef-17b5-41fc-9379-40b99f46a101",
+            "history": [
+                {
+                    "contextId": "a7cc0bef-17b5-41fc-9379-40b99f46a101",
+                    "kind": "message",
+                    "messageId": "296eafc9233142bd98279e4055165f12",
+                    "parts": [{ "kind": "text", "text": "How much is the exchange rate for 1 USD?" }],
+                    "role": "user",
+                    "taskId": "9d94c2d4-06e4-40e1-876b-22f5a2666e61"
+                }
+            ],
+            "id": "9d94c2d4-06e4-40e1-876b-22f5a2666e61",
+            "kind": "task",
+            "status": {
+                "message": {
+                    "contextId": "a7cc0bef-17b5-41fc-9379-40b99f46a101",
+                    "kind": "message",
+                    "messageId": "f0f5f3ff-335c-4e77-9b4a-01ff3908e7be",
+                    "parts": [
+                        {
+                            "kind": "text",
+                            "text": "Please specify which currency you would like to convert to."
+                        }
+                    ],
+                    "role": "agent",
+                    "taskId": "9d94c2d4-06e4-40e1-876b-22f5a2666e61"
+                },
+                "state": "input-required"
+            }
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Client sends the clarification (Seq 3)">
+    The follow-up message includes `contextId` and `taskId` from Seq 2 so the agent can resume the same conversation thread.
+
+    ```json
+    POST http://localhost:10000
+    Content-Type: application/json
+
+    {
+        "id": "b88d818d-1192-42be-b4eb-3ee6b96a7e35",
+        "jsonrpc": "2.0",
+        "method": "message/send",
+        "params": {
+            "message": {
+                "contextId": "a7cc0bef-17b5-41fc-9379-40b99f46a101",
+                "kind": "message",
+                "messageId": "70371e1f231f4597b65ccdf534930ca9",
+                "parts": [
+                    {
+                        "kind": "text",
+                        "text": "CAD"
+                    }
+                ],
+                "role": "user",
+                "taskId": "9d94c2d4-06e4-40e1-876b-22f5a2666e61"
+            }
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Agent completes with the full result (Seq 4)">
+    The task resumes in `working` and reaches `completed`. The `artifacts` array contains the final answer. The `history` now spans the entire two-turn conversation.
+
+    ```json
+    {
+        "id": "b88d818d-1192-42be-b4eb-3ee6b96a7e35",
+        "jsonrpc": "2.0",
+        "result": {
+            "artifacts": [
+                {
+                    "artifactId": "08373241-a745-4abe-a78b-9ca60882bcc6",
+                    "name": "conversion_result",
+                    "parts": [
+                        {
+                            "kind": "text",
+                            "text": "The exchange rate for 1 USD to CAD is 1.3739."
+                        }
+                    ]
+                }
+            ],
+            "contextId": "a7cc0bef-17b5-41fc-9379-40b99f46a101",
+            "history": [
+                {
+                    "contextId": "a7cc0bef-17b5-41fc-9379-40b99f46a101",
+                    "kind": "message",
+                    "messageId": "296eafc9233142bd98279e4055165f12",
+                    "parts": [{ "kind": "text", "text": "How much is the exchange rate for 1 USD?" }],
+                    "role": "user",
+                    "taskId": "9d94c2d4-06e4-40e1-876b-22f5a2666e61"
+                },
+                {
+                    "contextId": "a7cc0bef-17b5-41fc-9379-40b99f46a101",
+                    "kind": "message",
+                    "messageId": "f0f5f3ff-335c-4e77-9b4a-01ff3908e7be",
+                    "parts": [{ "kind": "text", "text": "Please specify which currency you would like to convert to." }],
+                    "role": "agent",
+                    "taskId": "9d94c2d4-06e4-40e1-876b-22f5a2666e61"
+                },
+                {
+                    "contextId": "a7cc0bef-17b5-41fc-9379-40b99f46a101",
+                    "kind": "message",
+                    "messageId": "70371e1f231f4597b65ccdf534930ca9",
+                    "parts": [{ "kind": "text", "text": "CAD" }],
+                    "role": "user",
+                    "taskId": "9d94c2d4-06e4-40e1-876b-22f5a2666e61"
+                },
+                {
+                    "contextId": "a7cc0bef-17b5-41fc-9379-40b99f46a101",
+                    "kind": "message",
+                    "messageId": "0eb4f200-a8cd-4d34-94f8-4d223eb1b2c0",
+                    "parts": [{ "kind": "text", "text": "Looking up the exchange rates..." }],
+                    "role": "agent",
+                    "taskId": "9d94c2d4-06e4-40e1-876b-22f5a2666e61"
+                },
+                {
+                    "contextId": "a7cc0bef-17b5-41fc-9379-40b99f46a101",
+                    "kind": "message",
+                    "messageId": "41c7c03a-a772-4dc8-a868-e8c7b7defc91",
+                    "parts": [{ "kind": "text", "text": "Processing the exchange rates.." }],
+                    "role": "agent",
+                    "taskId": "9d94c2d4-06e4-40e1-876b-22f5a2666e61"
+                }
+            ],
+            "id": "9d94c2d4-06e4-40e1-876b-22f5a2666e61",
+            "kind": "task",
+            "status": {
+                "state": "completed"
+            }
+        }
+    }
+    ```
+  </Step>
+</Steps>
+
+## Emitting input-required from an executor
+
+In your `AgentExecutor`, signal that the agent needs more information by calling `update_status` with `TaskState.input_required` and `final=True`. The `final=True` flag tells the SDK this is the last event for this processing cycle.
+
+```python
+await updater.update_status(
+    TaskState.input_required,
+    new_agent_text_message(
+        'Please specify which currency you would like to convert to.',
+        task.context_id,
+        task.id,
+    ),
+    final=True,
+)
+```
+
+<Warning>
+  Always pass `final=True` when transitioning to `input-required`, `completed`, `failed`, or `canceled`. Omitting it on a terminal transition will leave the SDK waiting for more events that will never arrive, causing timeouts on the client side.
+</Warning>
+
+## Task history
+
+Every response includes a `history` array listing all messages in the conversation in chronological order. Each message carries both `contextId` and `taskId` so the full lineage is traceable. The history grows across `input-required` / follow-up cycles within the same `contextId`.

@@ -1,72 +1,109 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "Agent2Agent (A2A)",
+  "theme": "luma",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#040404",
+    "light": "#d3fa63",
+    "dark": "#8c9454"
   },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
+  "favicon": "https://media.brand.dev/4d6a5d67-82bf-4a58-8d32-6540a5fc5977.png",
   "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
+    "light": "https://media.brand.dev/0cbc809c-3dd8-4c74-98f3-7bee7be95f98.svg",
+    "dark": "https://media.brand.dev/0cbc809c-3dd8-4c74-98f3-7bee7be95f98.svg"
   },
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:support@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/MathematicusLucian/A2A"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/MathematicusLucian/A2A"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "core-concepts"
+            ]
+          },
+          {
+            "group": "Building Agents",
+            "pages": [
+              "agents/agent-card",
+              "agents/agent-executor",
+              "agents/task-lifecycle",
+              "agents/streaming"
+            ]
+          },
+          {
+            "group": "Host Applications",
+            "pages": [
+              "hosts/overview",
+              "hosts/cli-host",
+              "hosts/multiagent-host"
+            ]
+          },
+          {
+            "group": "Extensions",
+            "pages": [
+              "extensions/overview",
+              "extensions/agp",
+              "extensions/secure-passport",
+              "extensions/timestamp",
+              "extensions/traceability"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/authentication",
+              "guides/push-notifications",
+              "guides/multimodal",
+              "guides/deployment"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Samples",
+        "groups": [
+          {
+            "group": "Python Agents",
+            "pages": [
+              "samples/python/helloworld",
+              "samples/python/langgraph",
+              "samples/python/adk",
+              "samples/python/crewai-semantickernel"
+            ]
+          },
+          {
+            "group": "Other Languages",
+            "pages": [
+              "samples/js",
+              "samples/go",
+              "samples/java",
+              "samples/dotnet"
+            ]
+          },
+          {
+            "group": "Demo & Notebooks",
+            "pages": [
+              "samples/demo-ui",
+              "samples/notebooks"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

@@ -1,0 +1,707 @@
+---
+title: "CrewAI and Semantic Kernel Agents for A2A"
+sidebarTitle: "CrewAI & Semantic Kernel"
+description: "Two A2A agent samples using popular Python frameworks: a CrewAI image generation agent and a Semantic Kernel multi-agent travel planner with multi-turn streaming."
+---
+
+This page covers two A2A Python agent samples that demonstrate how different LLM orchestration frameworks integrate with the A2A protocol. The **CrewAI agent** generates images from text prompts using Google Gemini, while the **Semantic Kernel travel agent** coordinates a multi-agent pipeline for trip planning and currency conversion with real-time streaming and conversational memory.
+
+---
+
+## CrewAI Image Generation Agent
+
+The CrewAI agent accepts a text description from a client, passes it to a Google Gemini image generation model through a CrewAI `@tool`, and returns the resulting image as a binary `FilePart` artifact. An in-memory image cache (`InMemoryCache`) allows subsequent requests to reference and modify images generated earlier in the same session.
+
+### Directory layout
+
+```text
+samples/python/agents/crewai/
+├── agent.py           # ImageGenerationAgent + ImageGenerationTool (CrewAI)
+├── agent_executor.py  # ImageGenerationAgentExecutor
+├── __main__.py        # AgentCard, A2AStarletteApplication startup
+├── in_memory_cache.py # Session-scoped image cache
+└── Containerfile
+```
+
+### What it does
+
+```text
+A2A Client → A2AStarletteApplication → ImageGenerationAgentExecutor
+                                               ↓
+                                   ImageGenerationAgent.invoke()
+                                               ↓
+                                   CrewAI Crew.kickoff()
+                                               ↓
+                                   generate_image_tool → Gemini API
+                                               ↓
+                                   FilePart artifact returned to client
+```
+
+### Prerequisites
+
+- Python 3.12 or higher
+- [uv](https://docs.astral.sh/uv/) package manager
+- A Google API key with access to `gemini-2.0-flash-exp` (or Vertex AI credentials)
+
+### Setup and running
+
+<Steps>
+  <Step title="Navigate to the sample directory">
+    ```bash
+    cd samples/python/agents/crewai
+    ```
+  </Step>
+  <Step title="Set your Google credentials">
+    <Tabs>
+      <Tab title="Google API Key">
+        ```bash
+        echo "GOOGLE_API_KEY=your_api_key_here" > .env
+        ```
+      </Tab>
+      <Tab title="Vertex AI">
+        ```bash
+        echo "GOOGLE_GENAI_USE_VERTEXAI=true" > .env
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+  <Step title="Pin Python and create the virtual environment">
+    ```bash
+    uv python pin 3.13
+    uv venv
+    source .venv/bin/activate
+    ```
+  </Step>
+  <Step title="Start the agent server">
+    ```bash
+    # Default host localhost, port 10001
+    uv run .
+
+    # Custom host/port
+    uv run . --host 0.0.0.0 --port 8080
+    ```
+  </Step>
+  <Step title="Connect with the CLI host">
+    ```bash
+    cd samples/python/hosts/cli
+    uv run . --agent http://localhost:10001
+    ```
+  </Step>
+</Steps>
+
+### `agent.py` — ImageGenerationAgent
+
+#### CrewAI tool
+
+The `@tool` decorator wraps the Gemini call so CrewAI's planner knows when and how to invoke it:
+
+```python
+@tool('ImageGenerationTool')
+def generate_image_tool(
+    prompt: str, session_id: str, artifact_file_id: str = None
+) -> str:
+    """Image generation tool that generates images or modifies a given image based on a prompt."""
+    if not prompt:
+        raise ValueError('Prompt cannot be empty')
+
+    client = genai.Client()
+    cache = InMemoryCache()
+
+    # Retrieve an existing image from the cache to use as a reference
+    ref_image = None
+    try:
+        session_image_data = cache.get(session_id)
+        if artifact_file_id:
+            ref_image_data = session_image_data[artifact_file_id]
+        else:
+            latest_key = list(session_image_data.keys())[-1]
+            ref_image_data = session_image_data[latest_key]
+        ref_bytes = base64.b64decode(ref_image_data.bytes)
+        ref_image = Image.open(BytesIO(ref_bytes))
+    except Exception:
+        ref_image = None
+
+    contents = [prompt, ref_image] if ref_image else prompt
+
+    response = client.models.generate_content(
+        model='gemini-2.0-flash-exp',
+        contents=contents,
+        config=types.GenerateContentConfig(
+            response_modalities=['Text', 'Image']
+        ),
+    )
+
+    for part in response.candidates[0].content.parts:
+        if part.inline_data is not None:
+            data = Imagedata(
+                bytes=base64.b64encode(part.inline_data.data).decode('utf-8'),
+                mime_type=part.inline_data.mime_type,
+                name='generated_image.png',
+                id=uuid4().hex,
+            )
+            session_data = cache.get(session_id)
+            if session_data is None:
+                cache.set(session_id, {data.id: data})
+            else:
+                session_data[data.id] = data
+            return data.id
+
+    return -999999999
+```
+
+#### Agent, task, and crew construction
+
+```python
+class ImageGenerationAgent:
+    SUPPORTED_CONTENT_TYPES = ['text', 'text/plain', 'image/png']
+
+    def __init__(self):
+        if os.getenv('GOOGLE_GENAI_USE_VERTEXAI'):
+            self.model = LLM(model='vertex_ai/gemini-2.0-flash')
+        elif os.getenv('GOOGLE_API_KEY'):
+            self.model = LLM(
+                model='gemini/gemini-2.0-flash',
+                api_key=os.getenv('GOOGLE_API_KEY'),
+            )
+
+        self.image_creator_agent = Agent(
+            role='Image Creation Expert',
+            goal=(
+                "Generate an image based on the user's text prompt. If the prompt is "
+                'vague, ask clarifying questions. Focus on interpreting the user\'s '
+                'request and using the Image Generator tool effectively.'
+            ),
+            backstory=(
+                'You are a digital artist powered by AI. You specialize in taking '
+                'textual descriptions and transforming them into visual '
+                'representations using a powerful image generation tool.'
+            ),
+            verbose=False,
+            allow_delegation=False,
+            tools=[generate_image_tool],
+            llm=self.model,
+        )
+
+        self.image_creation_task = Task(
+            description=(
+                "Receive a user prompt: '{user_prompt}'.\n"
+                'Analyze the prompt and identify if you need to create a new image '
+                'or edit an existing one. Use the Image Generator tool for image '
+                'creation or modification.'
+            ),
+            expected_output='The id of the generated image',
+            agent=self.image_creator_agent,
+        )
+
+        self.image_crew = Crew(
+            agents=[self.image_creator_agent],
+            tasks=[self.image_creation_task],
+            process=Process.sequential,
+            verbose=False,
+        )
+
+    def invoke(self, query, session_id) -> str:
+        """Kickoff CrewAI and return the response."""
+        artifact_file_id = self.extract_artifact_file_id(query)
+        inputs = {
+            'user_prompt': query,
+            'session_id': session_id,
+            'artifact_file_id': artifact_file_id,
+        }
+        response = self.image_crew.kickoff(inputs)
+        return response
+```
+
+<Note>
+  CrewAI does not natively support streaming. The `stream` method on
+  `ImageGenerationAgent` raises `NotImplementedError`, so the A2A server is
+  configured with `AgentCapabilities(streaming=False)`.
+</Note>
+
+### `agent_executor.py` — A2A adapter
+
+The executor calls `agent.invoke()` synchronously (inside the async context), then retrieves the generated `Imagedata` from the cache and enqueues a completed `Task` event with the image bytes as a `FilePart`:
+
+```python
+class ImageGenerationAgentExecutor(AgentExecutor):
+    def __init__(self) -> None:
+        self.agent = ImageGenerationAgent()
+
+    async def execute(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
+        error = self._validate_request(context)
+        if error:
+            raise ServerError(error=InvalidParamsError())
+
+        query = context.get_user_input()
+        result = self.agent.invoke(query, context.context_id)
+
+        data = self.agent.get_image_data(
+            session_id=context.context_id, image_key=result.raw
+        )
+        if data and not data.error:
+            parts = [
+                FilePart(
+                    file=FileWithBytes(
+                        bytes=data.bytes,
+                        mime_type=data.mime_type,
+                        name=data.id,
+                    )
+                )
+            ]
+        else:
+            parts = [
+                Part(root=TextPart(text=data.error if data else 'failed to generate image'))
+            ]
+
+        await event_queue.enqueue_event(
+            completed_task(
+                context.task_id,
+                context.context_id,
+                [new_artifact(parts, f'image_{context.task_id}')],
+                [context.message],
+            )
+        )
+```
+
+### `__main__.py` — AgentCard and server startup
+
+```python
+capabilities = AgentCapabilities(streaming=False)
+skill = AgentSkill(
+    id='image_generator',
+    name='Image Generator',
+    description=(
+        'Generate stunning, high-quality images on demand and leverage'
+        ' powerful editing capabilities to modify, enhance, or completely'
+        ' transform visuals.'
+    ),
+    tags=['generate image', 'edit image'],
+    examples=['Generate a photorealistic image of raspberry lemonade'],
+)
+agent_card = AgentCard(
+    name='Image Generator Agent',
+    description='Generate and edit images using Gemini.',
+    url=agent_host_url,
+    version='1.0.0',
+    default_input_modes=ImageGenerationAgent.SUPPORTED_CONTENT_TYPES,
+    default_output_modes=ImageGenerationAgent.SUPPORTED_CONTENT_TYPES,
+    capabilities=capabilities,
+    skills=[skill],
+)
+
+request_handler = DefaultRequestHandler(
+    agent_executor=ImageGenerationAgentExecutor(),
+    task_store=InMemoryTaskStore(),
+)
+server = A2AStarletteApplication(
+    agent_card=agent_card, http_handler=request_handler
+)
+uvicorn.run(server.build(), host=host, port=port)
+```
+
+### Container deployment
+
+<Steps>
+  <Step title="Navigate to the Python samples root">
+    ```bash
+    cd samples/python
+    ```
+  </Step>
+  <Step title="Build the container image">
+    ```bash
+    podman build -f agents/crewai/Containerfile . -t crewai-a2a-server
+    ```
+  </Step>
+  <Step title="Run the container">
+    ```bash
+    podman run -p 10001:10001 -e GOOGLE_API_KEY=your_api_key_here crewai-a2a-server
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Semantic Kernel Travel Agent
+
+The Semantic Kernel agent implements a **multi-agent travel planner** using three `ChatCompletionAgent` instances: a top-level `TravelManagerAgent` that delegates to a `CurrencyExchangeAgent` (with a Frankfurter plugin) and an `ActivityPlannerAgent`. All three are wired using SK's agent-as-plugin pattern. The outer agent maintains `ChatHistoryAgentThread` across turns, providing in-memory conversational context.
+
+### Directory layout
+
+```text
+samples/python/agents/semantickernel/
+├── agent.py           # SemanticKernelTravelAgent + CurrencyPlugin + ResponseFormat
+├── agent_executor.py  # SemanticKernelTravelAgentExecutor
+├── __main__.py        # AgentCard, server startup
+├── .envexample        # Environment variable template
+└── Containerfile
+```
+
+### What it does
+
+```text
+A2A Client → SemanticKernelTravelAgentExecutor
+                    ↓
+           SemanticKernelTravelAgent.stream()
+                    ↓
+           TravelManagerAgent (SK ChatCompletionAgent)
+              ↙                           ↘
+CurrencyExchangeAgent               ActivityPlannerAgent
+(CurrencyPlugin → Frankfurter API)   (itinerary recommendations)
+```
+
+### Prerequisites
+
+- Python 3.10 or higher
+- [uv](https://docs.astral.sh/uv/) package manager
+- Azure OpenAI credentials (default) **or** OpenAI credentials
+
+### Setup and running
+
+<Steps>
+  <Step title="Navigate to the sample directory">
+    ```bash
+    cd samples/python/agents/semantickernel
+    ```
+  </Step>
+  <Step title="Create the .env file">
+    <Tabs>
+      <Tab title="Azure OpenAI (default)">
+        ```bash
+        AZURE_OPENAI_API_KEY="your-azure-api-key"
+        AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
+        AZURE_OPENAI_CHAT_DEPLOYMENT_NAME="your-deployment-name"
+        AZURE_OPENAI_API_VERSION="2024-12-01-preview"
+        ```
+      </Tab>
+      <Tab title="OpenAI">
+        ```bash
+        OPENAI_API_KEY="your_api_key_here"
+        OPENAI_CHAT_MODEL_ID="your-model-id"
+        ```
+        Then change line in `agent.py`:
+        ```python
+        # From:
+        chat_service = get_chat_completion_service(ChatServices.AZURE_OPENAI)
+        # To:
+        chat_service = get_chat_completion_service(ChatServices.OPENAI)
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+  <Step title="Pin Python version and create the virtual environment">
+    ```bash
+    uv python pin 3.12
+    uv venv
+    source .venv/bin/activate
+    ```
+  </Step>
+  <Step title="Start the agent server">
+    ```bash
+    # Default port 10020
+    uv run .
+
+    # Custom host/port
+    uv run . --host 0.0.0.0 --port 8080
+    ```
+  </Step>
+  <Step title="Connect with the CLI host">
+    ```bash
+    cd samples/python/hosts/cli
+    uv run . --agent http://localhost:10020
+    ```
+  </Step>
+</Steps>
+
+### `agent.py` — multi-agent pipeline
+
+#### CurrencyPlugin
+
+The Frankfurter exchange-rate call is wrapped as a `@kernel_function` so that Semantic Kernel can expose it as a plugin to `CurrencyExchangeAgent`:
+
+```python
+class CurrencyPlugin:
+    """A simple currency plugin that leverages Frankfurter for exchange rates."""
+
+    @kernel_function(
+        description='Retrieves exchange rate between currency_from and currency_to using Frankfurter API'
+    )
+    def get_exchange_rate(
+        self,
+        currency_from: Annotated[str, 'Currency code to convert from, e.g. USD'],
+        currency_to: Annotated[str, 'Currency code to convert to, e.g. EUR or INR'],
+        date: Annotated[str, "Date or 'latest'"] = 'latest',
+    ) -> str:
+        try:
+            response = httpx.get(
+                f'https://api.frankfurter.app/{date}',
+                params={'from': currency_from, 'to': currency_to},
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if 'rates' not in data or currency_to not in data['rates']:
+                return f'Could not retrieve rate for {currency_from} to {currency_to}'
+            rate = data['rates'][currency_to]
+            return f'1 {currency_from} = {rate} {currency_to}'
+        except Exception as e:
+            return f'Currency API call failed: {e!s}'
+```
+
+#### Three-agent hierarchy
+
+```python
+class SemanticKernelTravelAgent:
+    def __init__(self):
+        chat_service = get_chat_completion_service(ChatServices.AZURE_OPENAI)
+
+        currency_exchange_agent = ChatCompletionAgent(
+            service=chat_service,
+            name='CurrencyExchangeAgent',
+            instructions=(
+                'You specialize in handling currency-related requests from travelers. '
+                'Provide current exchange rates, convert amounts, and advise on '
+                'currency exchange best practices.'
+            ),
+            plugins=[CurrencyPlugin()],
+        )
+
+        activity_planner_agent = ChatCompletionAgent(
+            service=chat_service,
+            name='ActivityPlannerAgent',
+            instructions=(
+                'You specialize in planning and recommending activities for travelers. '
+                'Suggest sightseeing, local events, dining, and itineraries.'
+            ),
+        )
+
+        self.agent = ChatCompletionAgent(
+            service=chat_service,
+            name='TravelManagerAgent',
+            instructions=(
+                "Analyze the traveler's request and forward it to the appropriate agent. "
+                'Forward monetary/currency questions to CurrencyExchangeAgent. '
+                'Forward activity/itinerary questions to ActivityPlannerAgent.'
+            ),
+            plugins=[currency_exchange_agent, activity_planner_agent],
+            arguments=KernelArguments(
+                settings=OpenAIChatPromptExecutionSettings(
+                    response_format=ResponseFormat,
+                )
+            ),
+        )
+```
+
+#### Streaming with intermediate message handling
+
+The `stream` method uses `agent.invoke_stream()` with an `on_intermediate_message` callback to detect when the agent makes plugin (function) calls. This drives the `working` status updates that flow back to the A2A client:
+
+```python
+    async def stream(
+        self,
+        user_input: str,
+        session_id: str,
+    ) -> AsyncIterable[dict[str, Any]]:
+        await self._ensure_thread_exists(session_id)
+
+        plugin_notice_seen = False
+        plugin_event = asyncio.Event()
+        text_notice_seen = False
+        chunks: list[StreamingChatMessageContent] = []
+
+        async def _handle_intermediate_message(message: 'ChatMessageContent') -> None:
+            nonlocal plugin_notice_seen
+            if not plugin_notice_seen:
+                plugin_notice_seen = True
+                plugin_event.set()
+
+        async for chunk in self.agent.invoke_stream(
+            messages=user_input,
+            thread=self.thread,
+            on_intermediate_message=_handle_intermediate_message,
+        ):
+            if plugin_event.is_set():
+                yield {
+                    'is_task_complete': False,
+                    'require_user_input': False,
+                    'content': 'Processing function calls...',
+                }
+                plugin_event.clear()
+
+            if any(isinstance(i, StreamingTextContent) for i in chunk.items):
+                if not text_notice_seen:
+                    yield {
+                        'is_task_complete': False,
+                        'require_user_input': False,
+                        'content': 'Building the output...',
+                    }
+                    text_notice_seen = True
+                chunks.append(chunk.message)
+
+        if chunks:
+            yield self._get_agent_response(sum(chunks[1:], chunks[0]))
+```
+
+### `agent_executor.py` — A2A adapter
+
+The executor converts the three-valued stream output (`working`, `input_required`, `completed`) into the corresponding A2A event types:
+
+```python
+class SemanticKernelTravelAgentExecutor(AgentExecutor):
+    def __init__(self):
+        self.agent = SemanticKernelTravelAgent()
+
+    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        query = context.get_user_input()
+        task = context.current_task
+        if not task:
+            task = new_task(context.message)
+            await event_queue.enqueue_event(task)
+
+        async for partial in self.agent.stream(query, task.context_id):
+            require_input = partial['require_user_input']
+            is_done = partial['is_task_complete']
+            text_content = partial['content']
+
+            if require_input:
+                await event_queue.enqueue_event(
+                    TaskStatusUpdateEvent(
+                        status=TaskStatus(
+                            state=TaskState.input_required,
+                            message=new_agent_text_message(
+                                text_content, task.context_id, task.id
+                            ),
+                        ),
+                        final=True,
+                        context_id=task.context_id,
+                        task_id=task.id,
+                    )
+                )
+            elif is_done:
+                await event_queue.enqueue_event(
+                    TaskArtifactUpdateEvent(
+                        append=False,
+                        context_id=task.context_id,
+                        task_id=task.id,
+                        last_chunk=True,
+                        artifact=new_text_artifact(
+                            name='current_result',
+                            description='Result of request to agent.',
+                            text=text_content,
+                        ),
+                    )
+                )
+                await event_queue.enqueue_event(
+                    TaskStatusUpdateEvent(
+                        status=TaskStatus(state=TaskState.completed),
+                        final=True,
+                        context_id=task.context_id,
+                        task_id=task.id,
+                    )
+                )
+            else:
+                await event_queue.enqueue_event(
+                    TaskStatusUpdateEvent(
+                        status=TaskStatus(
+                            state=TaskState.working,
+                            message=new_agent_text_message(
+                                text_content, task.context_id, task.id
+                            ),
+                        ),
+                        final=False,
+                        context_id=task.context_id,
+                        task_id=task.id,
+                    )
+                )
+```
+
+### JSON-RPC example
+
+<CodeGroup>
+```json Request
+POST http://localhost:10020
+Content-Type: application/json
+
+{
+  "jsonrpc": "2.0",
+  "id": 33,
+  "method": "message/send",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{ "type": "text", "text": "How much is 1 USD to EUR?" }]
+    }
+  }
+}
+```
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 33,
+  "result": {
+    "id": "3",
+    "status": {
+      "state": "completed",
+      "timestamp": "2025-04-01T16:53:29.301828"
+    },
+    "artifacts": [{
+      "parts": [{ "type": "text", "text": "1 USD is approximately 0.88137 EUR." }],
+      "index": 0
+    }]
+  }
+}
+```
+</CodeGroup>
+
+### Container deployment
+
+<Steps>
+  <Step title="Navigate to the Python samples root">
+    ```bash
+    cd samples/python
+    ```
+  </Step>
+  <Step title="Build the container image">
+    ```bash
+    podman build -f agents/semantickernel/Containerfile . -t semantickernel-a2a-server
+    ```
+  </Step>
+  <Step title="Run with OpenAI credentials">
+    ```bash
+    podman run -p 10020:10020 \
+      -e OPENAI_API_KEY=your_api_key_here \
+      -e OPENAI_MODEL_ID=your-model-id \
+      semantickernel-a2a-server
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  Access the containerised agent at `0.0.0.0:10020` rather than `localhost`.
+  Set `HOST_OVERRIDE` to the external hostname if the container runs behind a
+  reverse proxy.
+</Warning>
+
+---
+
+## Side-by-side comparison
+
+| | CrewAI Image Agent | Semantic Kernel Travel Agent |
+|---|---|---|
+| **Framework** | CrewAI + Google Gemini | Semantic Kernel (Azure/OpenAI) |
+| **Task type** | Image generation | Travel planning + currency |
+| **Streaming** | No (`streaming=False`) | Yes (`message/stream`) |
+| **Multi-turn** | No | Yes (ChatHistoryAgentThread) |
+| **Output type** | `FilePart` (image bytes) | Text artifact |
+| **Sub-agents** | Single CrewAI Agent | TravelManager → Currency + Activity |
+| **Default port** | 10001 | 10020 |
+| **Memory** | In-memory image cache | In-memory ChatHistoryAgentThread |
+
+<Warning>
+  Both agents treat all external input as potentially untrusted. Never forward
+  unvalidated agent output directly into LLM prompts — doing so exposes your
+  application to prompt injection attacks.
+</Warning>

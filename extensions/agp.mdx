@@ -1,0 +1,233 @@
+---
+title: "Agent Gateway Protocol (AGP) Extension for A2A"
+sidebarTitle: "AGP"
+description: "AGP adds hierarchical, policy-based routing to the A2A mesh. Covers CapabilityAnnouncement, IntentPayload, AGPTable, gateway declaration, and error codes."
+---
+
+The Agent Gateway Protocol (AGP) is a routing extension for the Agent2Agent protocol that introduces a hierarchical structure of interconnected **Autonomous Squads (ASq)** on top of the flat A2A mesh. Inspired by the Border Gateway Protocol (BGP) used on the Internet, AGP routes **Intent** payloads to squads based on declared **Capabilities** and configurable **Policies**, enabling enterprise-scale multi-agent systems that span finance, engineering, HR, and other organisational domains.
+
+## Abstract
+
+In a flat A2A mesh every agent communicates directly with every other agent. AGP enhances this by grouping agents into squads, each represented by a **Gateway Agent** that advertises the squad's capabilities to its peers. When a client sends an Intent, the Gateway Agent consults its routing table (the **AGPTable**), applies policy filtering, and forwards the request to the lowest-cost compliant squad — without the client needing to know which underlying agent fulfils the work.
+
+```text
+Client → Gateway Agent → AGPTable lookup → Squad_Finance/gateway
+                                         → Squad_Engineering/gateway
+                                         → Squad_HR/gateway
+```
+
+<Note>
+  AGP is classified as a **Core Protocol Layer / Routing Extension** (`Type: routing`). Agents that are not gateway agents do not need to implement any AGP logic; they simply continue to handle standard A2A task requests.
+</Note>
+
+## Extension URI
+
+```text
+https://github.com/a2aproject/a2a-samples/tree/main/extensions/agp
+```
+
+## Data Structures
+
+### CapabilityAnnouncement
+
+A Squad Gateway Agent broadcasts a `CapabilityAnnouncement` to its peers whenever it can fulfil a new capability. Peers store these announcements in their AGPTable.
+
+<ParamField body="capability" type="string" required>
+  The function or skill provided by the squad. Use a colon-delimited hierarchy to express specificity, for example `financial_analysis:quarterly` or `billing:invoice:generate`.
+</ParamField>
+
+<ParamField body="version" type="string" required>
+  Semantic version of the capability's schema or interface contract (e.g., `"1.5"`). Clients can use this to ensure interface compatibility before routing.
+</ParamField>
+
+<ParamField body="cost" type="number">
+  Optional estimated cost metric for fulfilling this capability — expressed as USD, token count, or any normalised unit. Used by the Gateway's lowest-cost route selection algorithm.
+</ParamField>
+
+<ParamField body="policy" type="object" required>
+  Key-value pairs declaring the security and data-handling requirements of the squad. Common keys include `requires_auth`, `security_level`, and `requires_pii`. The gateway uses these when evaluating an Intent's `policy_constraints`.
+</ParamField>
+
+```json
+{
+  "capability": "financial_analysis:quarterly",
+  "version": "1.5",
+  "cost": 0.05,
+  "policy": {
+    "requires_auth": "level_3"
+  }
+}
+```
+
+### Intent Payload
+
+The Intent replaces a standard A2A task request. It describes *what* needs to be achieved and the *constraints* under which it must be fulfilled — the Gateway resolves the *how*.
+
+<ParamField body="target_capability" type="string" required>
+  The capability the Intent seeks to fulfil, matched against `CapabilityAnnouncement.capability` entries in the AGPTable.
+</ParamField>
+
+<ParamField body="payload" type="object" required>
+  The core data arguments required for the task. The schema is capability-specific and opaque to the Gateway.
+</ParamField>
+
+<ParamField body="policy_constraints" type="object">
+  Client-defined constraints that must be satisfied by the destination squad's declared `policy`. For example, `{ "requires_pii": true }` will only match squads that have declared `requires_pii: true` in their announcement.
+</ParamField>
+
+```json
+{
+  "target_capability": "billing:invoice:generate",
+  "payload": {
+    "customer_id": 123,
+    "amount": 99.99
+  },
+  "policy_constraints": {
+    "requires_pii": true
+  }
+}
+```
+
+### RouteEntry and AGPTable
+
+The Gateway Agent maintains an **AGPTable** — a routing table built from all received `CapabilityAnnouncement` objects. Each table entry maps a capability key to a list of `RouteEntry` objects.
+
+#### RouteEntry
+
+<ParamField body="path" type="string" required>
+  The destination Squad or API path, for example `Squad_Finance/gateway`. This is the address the Gateway uses when forwarding an Intent.
+</ParamField>
+
+<ParamField body="cost" type="number" required>
+  The cost metric for this route. When multiple compliant routes exist, the Gateway selects the one with the **lowest cost**.
+</ParamField>
+
+<ParamField body="policy" type="object" required>
+  The policies declared by the destination squad, copied from its `CapabilityAnnouncement`. Used during the policy-matching step to evaluate an incoming Intent's `policy_constraints`.
+</ParamField>
+
+#### AGPTable Structure
+
+The AGPTable maps each `capability` string to an ordered list of `RouteEntry` objects:
+
+```python
+class AGPTable(BaseModel):
+    """The central routing table maintained by a Gateway Agent."""
+
+    routes: dict[str, list[RouteEntry]] = Field(default_factory=dict)
+```
+
+## Routing Algorithm
+
+The Gateway's `select_best_route` method performs **Policy-Based Routing** in three steps:
+
+<Steps>
+  <Step title="Capability Lookup">
+    Check whether `intent.target_capability` exists as a key in `agp_table.routes`. If not, return `AGP_ROUTE_NOT_FOUND`.
+  </Step>
+  <Step title="Policy Filtering">
+    For each candidate `RouteEntry`, verify that every constraint in `intent.policy_constraints` is satisfied by the route's `policy`. Numeric fields like `security_level` are compared with `>=`; all other fields require exact equality.
+  </Step>
+  <Step title="Lowest-Cost Selection">
+    From the compliant routes, select the one with the minimum `cost` value and forward the Intent to its `path`.
+  </Step>
+</Steps>
+
+```python
+class AgentGatewayProtocol:
+    def route_intent(self, intent: IntentPayload) -> Optional[RouteEntry]:
+        """
+        Public entry point for routing an Intent payload, including printing side effects.
+        """
+        best_route = self.__select_best_route(intent)
+
+        if best_route:
+            print(
+                f"[{self.squad_name}] ROUTING SUCCESS: Intent for '{intent.target_capability}' "
+                f"routed to {best_route.path} (Cost: {best_route.cost})"
+            )
+        return best_route
+```
+
+## Agent Card Declaration
+
+To participate in the AGP hierarchy, a Gateway Agent **MUST** declare its role in the `extensions` array of its `AgentCapabilities`. The `agent_role` field must be `"gateway"` and `supported_agp_versions` must list every AGP version the agent honours.
+
+```json
+{
+  "capabilities": {
+    "extensions": [
+      {
+        "uri": "https://github.com/a2aproject/a2a-samples/tree/main/extensions/agp",
+        "params": {
+          "agent_role": "gateway",
+          "supported_agp_versions": ["1.0"]
+        }
+      }
+    ]
+  }
+}
+```
+
+<Tip>
+  Leaf agents (non-gateway) do **not** include an AGP extension declaration. Their capabilities are announced to the Gateway Agent through the `CapabilityAnnouncement` mechanism, not through their AgentCard.
+</Tip>
+
+## Error Codes
+
+When routing fails, the Gateway Agent **MUST** return a JSON-RPC 2.0 error response using one of the following AGP-defined error codes.
+
+<AccordionGroup>
+  <Accordion title="-32200 AGP_ROUTE_NOT_FOUND">
+    No agent or squad has announced the requested `target_capability`. The Intent cannot be routed and is returned to the sender unchanged.
+
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "id": "req-001",
+      "error": {
+        "code": -32200,
+        "message": "AGP_ROUTE_NOT_FOUND",
+        "data": {
+          "target_capability": "hr:onboarding:initiate"
+        }
+      }
+    }
+    ```
+  </Accordion>
+  <Accordion title="-32201 AGP_POLICY_VIOLATION">
+    Routes for the requested capability were found, but none satisfied the constraints in the Intent's `policy_constraints`. For example, the client required `requires_pii: true` but no squad in the table accepts PII data.
+
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "id": "req-002",
+      "error": {
+        "code": -32201,
+        "message": "AGP_POLICY_VIOLATION",
+        "data": {
+          "unmet_constraints": { "requires_pii": true }
+        }
+      }
+    }
+    ```
+  </Accordion>
+  <Accordion title="-32202 AGP_TABLE_STALE">
+    The Gateway's AGPTable is outdated. The Gateway will attempt a refresh before retrying; if the refresh fails or the capability is still absent, this error is returned to the caller.
+
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "id": "req-003",
+      "error": {
+        "code": -32202,
+        "message": "AGP_TABLE_STALE"
+      }
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Version
+
+AGP specification version **1.0.0**.

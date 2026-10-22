@@ -1,0 +1,612 @@
+---
+title: "A2A Core Concepts: Protocol Primitives and Architecture"
+sidebarTitle: "Core Concepts"
+description: "Detailed reference for every A2A building block: AgentCards, Tasks, Messages, Artifacts, JSON-RPC methods, SSE streaming, EventQueue, and the extensions mechanism."
+---
+
+Agent2Agent (A2A) is built on a small, composable set of primitives. Understanding these concepts — how they are structured, how they relate to each other, and how they flow through a live interaction — is the foundation for building or consuming any A2A-compliant agent. This page covers each primitive in depth, with real JSON structures drawn from the sample agents.
+
+---
+
+## AgentCard
+
+An **AgentCard** is the machine-readable identity document that every A2A server publishes. Clients discover it before initiating any interaction. It answers three questions: *Who are you? What can you do? How do I reach you?*
+
+### Discovery
+
+By default, the card is served at:
+
+```http
+GET /.well-known/agent.json
+```
+
+Clients use `A2ACardResolver` to fetch and deserialise it:
+
+```python
+import httpx
+from a2a.client import A2ACardResolver
+
+async with httpx.AsyncClient() as httpx_client:
+    resolver = A2ACardResolver(
+        httpx_client=httpx_client,
+        base_url='http://127.0.0.1:9999',
+    )
+    public_agent_card = await resolver.get_agent_card()
+```
+
+### Structure
+
+<Tabs>
+  <Tab title="JSON">
+    ```json
+    {
+      "name": "Hello World Agent",
+      "description": "Just a hello world agent",
+      "version": "0.0.1",
+      "defaultInputModes": ["text/plain"],
+      "defaultOutputModes": ["text/plain"],
+      "capabilities": {
+        "streaming": true,
+        "extendedAgentCard": true
+      },
+      "supportedInterfaces": [
+        {
+          "protocolBinding": "JSONRPC",
+          "url": "http://127.0.0.1:9999",
+          "protocolVersion": "1.0"
+        }
+      ],
+      "skills": [
+        {
+          "id": "echo_bot",
+          "name": "Echo Bot",
+          "description": "An example agent that acknowledges client request and responds with a Hello World message.",
+          "inputModes": ["text/plain"],
+          "outputModes": ["text/plain"],
+          "tags": ["a2a", "echo-example"],
+          "examples": ["hi", "how are you"]
+        }
+      ]
+    }
+    ```
+  </Tab>
+  <Tab title="Python (server-side)">
+    ```python
+    from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+
+    skill = AgentSkill(
+        id='echo_bot',
+        name='Echo Bot',
+        description='An example agent that acknowledges client request and responds with a "Hello World" message.',
+        input_modes=['text/plain'],
+        output_modes=['text/plain'],
+        tags=['a2a', 'echo-example'],
+        examples=['hi', 'how are you'],
+    )
+
+    public_agent_card = AgentCard(
+        name='Hello World Agent',
+        description='Just a hello world agent',
+        version='0.0.1',
+        default_input_modes=['text/plain'],
+        default_output_modes=['text/plain'],
+        capabilities=AgentCapabilities(streaming=True, extended_agent_card=True),
+        supported_interfaces=[
+            AgentInterface(
+                protocol_binding='JSONRPC',
+                url='http://127.0.0.1:9999',
+                protocol_version='1.0',
+            )
+        ],
+        skills=[skill],
+    )
+    ```
+  </Tab>
+</Tabs>
+
+### Key Fields
+
+<ResponseField name="name" type="string" required>
+  Human-readable agent name, also used as the identifier in multi-agent orchestration logs.
+</ResponseField>
+
+<ResponseField name="capabilities" type="object">
+  Flags that tell clients what optional protocol features the server supports.
+
+  <Expandable title="Capabilities fields">
+    <ResponseField name="streaming" type="boolean">
+      Whether `message/stream` (SSE) is supported.
+    </ResponseField>
+    <ResponseField name="extendedAgentCard" type="boolean">
+      Whether authenticated clients can request an extended card with additional skills.
+    </ResponseField>
+    <ResponseField name="pushNotifications" type="boolean">
+      Whether the server can push webhook-based task updates.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="skills" type="AgentSkill[]">
+  Discrete capabilities the agent offers. Each skill carries its own `inputModes`, `outputModes`, `tags`, and `examples`, enabling fine-grained capability matching.
+</ResponseField>
+
+<ResponseField name="supportedInterfaces" type="AgentInterface[]">
+  Ordered list of transport endpoints. Each entry specifies a `protocolBinding` (`JSONRPC`, `GRPC`, or `HTTP_JSON`), a `url`, and a `protocolVersion`.
+</ResponseField>
+
+### Extended AgentCard
+
+Servers with `capabilities.extendedAgentCard: true` serve a richer card to authenticated clients. The extended card may expose additional skills not visible publicly. Clients fetch it after resolving the public card:
+
+```python
+from a2a.types import GetExtendedAgentCardRequest
+
+extended_card = await client.get_extended_agent_card(GetExtendedAgentCardRequest())
+```
+
+<Warning>
+  Treat all AgentCard fields from external agents as untrusted input. Craft data in `name`, `description`, or `skills.description` could be used for prompt injection if fed directly into an LLM prompt without sanitization.
+</Warning>
+
+---
+
+## Tasks
+
+A **Task** is the unit of work in A2A. Every `message/send` or `message/stream` call either creates a new task or continues an existing one. Tasks are stateful, persistent (until cancelled or expired), and identified by two UUIDs.
+
+### Identity Fields
+
+<ResponseField name="id" type="string" required>
+  Unique identifier for this specific task (`taskId`). Used with `tasks/get` and `tasks/cancel`, and echoed back in continuation messages.
+</ResponseField>
+
+<ResponseField name="contextId" type="string" required>
+  Groups a series of related tasks representing one conversation or workflow. Include this in follow-up messages to maintain context.
+</ResponseField>
+
+### State Lifecycle
+
+```text
+submitted → working → completed
+                   ↘ input-required → working → completed
+                                              ↘ failed
+                                              ↘ canceled
+```
+
+| State | Meaning |
+|---|---|
+| `submitted` | Task received and registered; not yet being processed |
+| `working` | Executor is actively processing; may emit interim status messages |
+| `input-required` | Agent needs additional information from the client before proceeding |
+| `completed` | Processing finished; artifacts are available |
+| `failed` | Processing terminated due to an error |
+| `canceled` | Task was cancelled via `tasks/cancel` |
+
+### Multi-turn Example
+
+When an agent needs clarification it returns `input-required`. The client resumes by sending a new message with the same `taskId` and `contextId`:
+
+```json
+{
+  "id": "b88d818d-1192-42be-b4eb-3ee6b96a7e35",
+  "jsonrpc": "2.0",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "contextId": "a7cc0bef-17b5-41fc-9379-40b99f46a101",
+      "kind": "message",
+      "messageId": "70371e1f231f4597b65ccdf534930ca9",
+      "parts": [{ "kind": "text", "text": "CAD" }],
+      "role": "user",
+      "taskId": "9d94c2d4-06e4-40e1-876b-22f5a2666e61"
+    }
+  }
+}
+```
+
+<Tip>
+  The `contextId` groups all turns of one conversation. Always echo both `taskId` and `contextId` from the `input-required` response into your continuation message.
+</Tip>
+
+---
+
+## Messages
+
+**Messages** are the conversational envelopes that flow between user and agent. Every message has a `role` and carries one or more `parts`.
+
+### Structure
+
+```json
+{
+  "kind": "message",
+  "messageId": "120ec73f93024993becf954d03a672bc",
+  "role": "user",
+  "taskId": "58124b63-dd3b-46b8-bf1d-1cc1aefd1c8f",
+  "contextId": "e329f200-eaf4-4ae9-a8ef-a33cf9485367",
+  "parts": [
+    {
+      "kind": "text",
+      "text": "how much is 10 USD in INR?"
+    }
+  ]
+}
+```
+
+### Roles
+
+| Role | Description |
+|---|---|
+| `user` | Message originates from the human or client agent |
+| `agent` | Message originates from the server agent (status updates, clarifications) |
+
+### Part Types
+
+<Accordion title="TextPart — plain text or markdown">
+  The most common part type. Used for natural-language queries, status messages, and agent responses.
+
+  ```json
+  {
+    "kind": "text",
+    "text": "Looking up the exchange rates..."
+  }
+  ```
+
+  Created in Python with:
+  ```python
+  from a2a.helpers import new_text_part
+  part = new_text_part(text="Looking up rates...", media_type="text/plain")
+  ```
+</Accordion>
+
+<Accordion title="FilePart — binary or URI-referenced files">
+  Used for image, document, or audio payloads. File content can be inline base64 bytes or a URI reference.
+
+  ```json
+  {
+    "kind": "file",
+    "file": {
+      "name": "report.pdf",
+      "mimeType": "application/pdf",
+      "bytes": "<base64-encoded-content>"
+    }
+  }
+  ```
+</Accordion>
+
+<Accordion title="DataPart — structured JSON payloads">
+  Used when the agent or client needs to exchange structured data rather than prose.
+
+  ```json
+  {
+    "kind": "data",
+    "data": {
+      "currency": "INR",
+      "amount": 856.2,
+      "base": "USD"
+    }
+  }
+  ```
+</Accordion>
+
+---
+
+## Artifacts
+
+**Artifacts** are the final outputs of a task — distinct from the conversational history. They are named, versioned collections of parts that represent the deliverable rather than the dialogue.
+
+```json
+{
+  "artifactId": "08373241-a745-4abe-a78b-9ca60882bcc6",
+  "name": "conversion_result",
+  "parts": [
+    {
+      "kind": "text",
+      "text": "10 USD is 856.2 INR."
+    }
+  ]
+}
+```
+
+Artifacts appear in the `artifacts` array of a completed `Task`. In streaming mode they are delivered via `TaskArtifactUpdateEvent` events before the final `status-update` with `"final": true`.
+
+Artifacts are added from the executor using `TaskUpdater`:
+
+```python
+await task_updater.add_artifact(
+    parts=[new_text_part(text=result, media_type='text/plain')]
+)
+```
+
+---
+
+## JSON-RPC Methods
+
+All A2A interactions use JSON-RPC 2.0 over HTTP POST. The four protocol methods are:
+
+<Tabs>
+  <Tab title="message/send">
+    **Synchronous task execution.** The server processes the message to completion and returns the full `Task` object in the JSON-RPC result.
+
+    ```json
+    {
+      "id": "12113c25-b752-473f-977e-c9ad33cf4f56",
+      "jsonrpc": "2.0",
+      "method": "message/send",
+      "params": {
+        "message": {
+          "kind": "message",
+          "messageId": "120ec73f93024993becf954d03a672bc",
+          "parts": [{ "kind": "text", "text": "how much is 10 USD in INR?" }],
+          "role": "user"
+        }
+      }
+    }
+    ```
+
+    **Response:**
+    ```json
+    {
+      "id": "12113c25-b752-473f-977e-c9ad33cf4f56",
+      "jsonrpc": "2.0",
+      "result": {
+        "id": "58124b63-dd3b-46b8-bf1d-1cc1aefd1c8f",
+        "kind": "task",
+        "contextId": "e329f200-eaf4-4ae9-a8ef-a33cf9485367",
+        "status": { "state": "completed" },
+        "artifacts": [
+          {
+            "artifactId": "08373241-a745-4abe-a78b-9ca60882bcc6",
+            "name": "conversion_result",
+            "parts": [{ "kind": "text", "text": "10 USD is 856.2 INR." }]
+          }
+        ]
+      }
+    }
+    ```
+  </Tab>
+
+  <Tab title="message/stream">
+    **Streaming task execution.** The server responds with `Content-Type: text/event-stream`. Each SSE `data:` frame is a complete JSON-RPC result envelope.
+
+    ```json
+    {
+      "id": "6d12d159-ec67-46e6-8d43-18480ce7f6ca",
+      "jsonrpc": "2.0",
+      "method": "message/stream",
+      "params": {
+        "message": {
+          "kind": "message",
+          "messageId": "2f9538ef0984471aa0d5179ce3c67a28",
+          "parts": [{ "kind": "text", "text": "how much is 10 USD in INR?" }],
+          "role": "user"
+        }
+      }
+    }
+    ```
+
+    **SSE Response stream:**
+    ```
+    data: {"id":"6d12d159...","jsonrpc":"2.0","result":{"id":"423a2569...","kind":"task","status":{"state":"submitted"}}}
+
+    data: {"id":"6d12d159...","jsonrpc":"2.0","result":{"kind":"status-update","status":{"state":"working","message":{"parts":[{"kind":"text","text":"Looking up the exchange rates..."}]}},"final":false}}
+
+    data: {"id":"6d12d159...","jsonrpc":"2.0","result":{"kind":"artifact-update","artifact":{"name":"conversion_result","parts":[{"kind":"text","text":"10 USD is 856.2 INR."}]}}}
+
+    data: {"id":"6d12d159...","jsonrpc":"2.0","result":{"kind":"status-update","status":{"state":"completed"},"final":true}}
+    ```
+  </Tab>
+
+  <Tab title="tasks/get">
+    **Retrieve task state.** Useful for polling when push notifications or streaming are unavailable.
+
+    ```json
+    {
+      "id": "req-001",
+      "jsonrpc": "2.0",
+      "method": "tasks/get",
+      "params": {
+        "id": "58124b63-dd3b-46b8-bf1d-1cc1aefd1c8f"
+      }
+    }
+    ```
+
+    Returns the current `Task` snapshot including `status`, `history`, and `artifacts`.
+  </Tab>
+
+  <Tab title="tasks/cancel">
+    **Cancel a running task.** The server transitions the task to `canceled` state if it supports cancellation.
+
+    ```json
+    {
+      "id": "req-002",
+      "jsonrpc": "2.0",
+      "method": "tasks/cancel",
+      "params": {
+        "id": "58124b63-dd3b-46b8-bf1d-1cc1aefd1c8f"
+      }
+    }
+    ```
+
+    <Note>
+      The executor's `cancel()` method is called. Implementations that do not support cancellation raise `NotImplementedError`, which the framework surfaces as a JSON-RPC error response.
+    </Note>
+  </Tab>
+</Tabs>
+
+---
+
+## EventQueue and Streaming
+
+The **EventQueue** is the internal pub/sub bridge between an agent executor and the A2A server layer. Executors never write directly to the HTTP response — they enqueue typed events, and the server serialises them as SSE frames (streaming) or collects them into a final `Task` (non-streaming).
+
+### Executor Pattern
+
+```python
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue
+from a2a.server.tasks import TaskUpdater
+from a2a.helpers import new_task_from_user_message, new_text_message, new_text_part, get_message_text
+from a2a.types import TaskState
+
+class HelloWorldAgentExecutor(AgentExecutor):
+    def __init__(self) -> None:
+        self.agent = HelloWorldAgent()
+
+    async def execute(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
+        # 1. Obtain or create the task
+        if context.current_task:
+            task = context.current_task
+        else:
+            task = new_task_from_user_message(context.message)
+            await event_queue.enqueue_event(task)
+
+        # 2. Signal working state
+        task_updater = TaskUpdater(
+            event_queue=event_queue,
+            task_id=task.id,
+            context_id=task.context_id,
+        )
+        await task_updater.update_status(
+            state=TaskState.TASK_STATE_WORKING,
+            message=new_text_message('Processing request...'),
+        )
+
+        # 3. Run the underlying agent
+        query = get_message_text(context.message)
+        result = await self.agent.invoke(user_request=query) if query else 'No text input provided!'
+
+        # 4. Attach the result as an artifact
+        await task_updater.add_artifact(
+            parts=[new_text_part(text=result, media_type='text/plain')]
+        )
+
+        # 5. Mark completed
+        await task_updater.update_status(
+            state=TaskState.TASK_STATE_COMPLETED,
+            message=new_text_message('Request is completed!'),
+        )
+
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+        raise NotImplementedError('Cancel is not supported.')
+```
+
+### Event Types
+
+| Event | Description |
+|---|---|
+| `Task` | The initial task record, enqueued when a new task is created |
+| `TaskStatusUpdateEvent` | State transition with optional interim message; `final=True` on terminal states |
+| `TaskArtifactUpdateEvent` | Incremental artifact delivery; supports chunked streaming of large outputs |
+
+### Server Setup
+
+Routes are registered separately for the AgentCard endpoint and the JSON-RPC endpoint:
+
+```python
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
+from a2a.server.tasks import InMemoryTaskStore
+from starlette.applications import Starlette
+import uvicorn
+
+request_handler = DefaultRequestHandler(
+    agent_executor=HelloWorldAgentExecutor(),
+    task_store=InMemoryTaskStore(),
+    agent_card=public_agent_card,
+    extended_agent_card=extended_agent_card,
+)
+
+routes = []
+routes.extend(create_agent_card_routes(public_agent_card))
+routes.extend(create_jsonrpc_routes(request_handler, '/'))
+
+app = Starlette(routes=routes)
+uvicorn.run(app, host='127.0.0.1', port=9999)
+```
+
+---
+
+## Extensions
+
+A2A supports an optional **extensions mechanism** for negotiating supplemental behaviour between a client and server without breaking protocol compatibility. Extensions are identified by URI strings and activated via the `X-A2A-Extensions` HTTP header.
+
+```http
+X-A2A-Extensions: https://github.com/a2aproject/a2a-samples/samples/extensions/timestamp/v1
+```
+
+If the server recognises the URI it activates the extension for that request. Unrecognised URIs are silently ignored, ensuring forward compatibility.
+
+### Built-in Extensions
+
+<Accordion title="Timestamp Extension">
+  **URI:** `https://github.com/a2aproject/a2a-samples/samples/extensions/timestamp/v1`
+
+  Adds an RFC 3339 UTC creation timestamp to the `metadata` of every `Message` and `Artifact` returned in the response.
+
+  The timestamp is stored under the key `github.com/a2aproject/a2a-samples/samples/extensions/timestamp/v1/timestamp`.
+
+  ```json
+  {
+    "kind": "message",
+    "messageId": "abc123",
+    "metadata": {
+      "github.com/a2aproject/a2a-samples/samples/extensions/timestamp/v1/timestamp": "2025-06-01T14:23:05.123456789Z"
+    },
+    "parts": [{ "kind": "text", "text": "hello" }],
+    "role": "agent"
+  }
+  ```
+
+  Timestamps MUST have at least second-level precision; nanosecond precision is the maximum.
+</Accordion>
+
+<Accordion title="Traceability Extension">
+  **URI:** `https://github.com/a2aproject/a2a-samples/extensions/traceability/v1`
+
+  Attaches a structured call-graph trace to the response, stored under the key `github.com/a2aproject/a2a-samples/extensions/traceability/v1/traceability` or as an additional artifact.
+
+  Each trace contains a `trace_id` and a list of `Step` records. Each step captures:
+
+  - `step_id`, `parent_step_id` — tree structure of the call graph
+  - `call_type` — `AGENT` or `TOOL`
+  - `step_action` — either a `ToolInvocation` (name + parameters) or `AgentInvocation` (URL, name, requests, nested `ResponseTrace`)
+  - `cost`, `total_tokens`, `latency`, `start_time`, `end_time` — observability metrics
+  - `additional_attributes` — arbitrary key-value pairs for custom metadata
+</Accordion>
+
+<Accordion title="AGP — Agent Gateway Protocol">
+  Provides an alternative transport binding that routes A2A messages through an Agent Gateway. Useful for multi-hop traversal, network isolation, and routing topologies where agents are not directly reachable over HTTP.
+
+  See `extensions/agp/` in the repository for the full specification and Python implementation.
+</Accordion>
+
+<Info>
+  To implement a custom extension, define a URI, document what it adds to the request or response schema, and check for the URI in `X-A2A-Extensions` inside your executor or middleware. Clients that do not send the header receive standard responses.
+</Info>
+
+---
+
+## Putting It All Together
+
+The diagram below shows how the primitives compose in a single streaming interaction:
+
+```text
+Client                         A2A Server                    Executor
+  │                                │                              │
+  │── GET /.well-known/agent.json ─►│                              │
+  │◄─────── AgentCard ─────────────│                              │
+  │                                │                              │
+  │── POST / (message/stream) ─────►│                              │
+  │                                │── execute(context, queue) ──►│
+  │◄── SSE: Task{submitted} ───────│◄─ enqueue_event(task) ───────│
+  │◄── SSE: StatusUpdate{working} ─│◄─ update_status(WORKING) ────│
+  │◄── SSE: ArtifactUpdate ────────│◄─ add_artifact(...) ─────────│
+  │◄── SSE: StatusUpdate{completed}│◄─ update_status(COMPLETED) ──│
+  │                                │                              │
+```
+
+Each SSE frame is a self-contained JSON-RPC 2.0 result. The `contextId` threads all frames of a conversation together, and the `taskId` uniquely identifies the unit of work within that context.

@@ -1,0 +1,123 @@
+{
+  "projectType": "framework",
+  "projectName": "Agent2Agent (A2A)",
+  "projectDescription": "An open protocol and sample framework for standardized agent-to-agent interoperability, enabling AI agents built with any framework or language to communicate, delegate tasks, and collaborate via JSON-RPC over HTTP.",
+  "theme": "luma",
+  "primaryColor": "#040404",
+  "lightColor": "#d3fa63",
+  "darkColor": "#8c9454",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "core-concepts"
+            ]
+          },
+          {
+            "group": "Building Agents",
+            "pages": [
+              "agents/agent-card",
+              "agents/agent-executor",
+              "agents/task-lifecycle",
+              "agents/streaming"
+            ]
+          },
+          {
+            "group": "Host Applications",
+            "pages": [
+              "hosts/overview",
+              "hosts/cli-host",
+              "hosts/multiagent-host"
+            ]
+          },
+          {
+            "group": "Extensions",
+            "pages": [
+              "extensions/overview",
+              "extensions/agp",
+              "extensions/secure-passport",
+              "extensions/timestamp",
+              "extensions/traceability"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/authentication",
+              "guides/push-notifications",
+              "guides/multimodal",
+              "guides/deployment"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Samples",
+        "groups": [
+          {
+            "group": "Python Agents",
+            "pages": [
+              "samples/python/helloworld",
+              "samples/python/langgraph",
+              "samples/python/adk",
+              "samples/python/crewai-semantickernel"
+            ]
+          },
+          {
+            "group": "Other Languages",
+            "pages": [
+              "samples/js",
+              "samples/go",
+              "samples/java",
+              "samples/dotnet"
+            ]
+          },
+          {
+            "group": "Demo & Notebooks",
+            "pages": [
+              "samples/demo-ui",
+              "samples/notebooks"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Standardized JSON-RPC over HTTP protocol for agent-to-agent communication",
+    "AgentCard discovery mechanism for publishing agent capabilities and skills",
+    "Streaming support via Server-Sent Events for real-time task updates",
+    "Multi-turn conversational task management with state lifecycle (submitted, working, input-required, completed, canceled, failed)",
+    "Push notification support via webhooks",
+    "Multi-modal message parts: text, file, and data",
+    "Protocol extensions: AGP routing, Secure Passport, Timestamp, Traceability",
+    "Multi-language SDKs: Python, Go, Java, JavaScript, .NET, Rust",
+    "Support for popular AI frameworks: LangGraph, CrewAI, Semantic Kernel, Google ADK, LlamaIndex, Marvin"
+  ],
+  "publicApiSurface": [
+    "AgentCard — agent identity and capability discovery document",
+    "AgentSkill — declares input/output modes and tags for a skill",
+    "AgentCapabilities — flags for streaming and extended card support",
+    "AgentExecutor.execute(context, event_queue) — handles incoming tasks",
+    "AgentExecutor.cancel(context, event_queue) — cancels a running task",
+    "RequestContext — provides current task and message to the executor",
+    "EventQueue.enqueue_event() — emits task/status/artifact events",
+    "TaskUpdater.update_status(state, message) — transitions task state",
+    "TaskUpdater.add_artifact(parts) — appends output artifacts",
+    "DefaultRequestHandler — wires executor, task store, and agent card",
+    "InMemoryTaskStore — in-memory implementation of the task store",
+    "create_agent_card_routes() — Starlette routes for /.well-known/agent.json",
+    "create_jsonrpc_routes() — Starlette routes for message/send and message/stream",
+    "message/send — JSON-RPC method for synchronous task execution",
+    "message/stream — JSON-RPC method for streaming task execution (SSE)",
+    "tasks/get — JSON-RPC method to retrieve a task by ID",
+    "tasks/cancel — JSON-RPC method to cancel a running task",
+    "GET /.well-known/agent.json — AgentCard discovery endpoint"
+  ]
+}
